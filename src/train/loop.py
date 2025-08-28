@@ -15,7 +15,7 @@ from tqdm import tqdm
 from ..data.rules import sb_to_bits
 from ..data.stream import assemble_sequence, get_default_vocab, make_batch
 from ..model.hooked_life import build_model
-from ..viz.rollout import save_rollout_png
+from ..viz.rollout import save_rollout_png, save_rollout_mp4
 
 
 @dataclass
@@ -88,19 +88,20 @@ def train_loop(cfg) -> TrainStats:
             pbar.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}"})
             pbar.write(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
 
-        # Periodic rollout visualization
+        # Periodic rollout visualization (MP4, longer autoregressive rollout)
         if (step == 0) or ((step + 1) % 50 == 0):
             try:
                 os = __import__("os")
-                os.makedirs("runs/rollouts", exist_ok=True)
-                save_rollout_png(
+                os.makedirs("assets/rollouts", exist_ok=True)
+                save_rollout_mp4(
                     fwd,
                     rule_bits,
                     H,
                     W,
-                    steps=16,
+                    steps=64,
                     device=device,
-                    savepath=f"runs/rollouts/sg_step_{step+1:06d}.png",
+                    savepath=f"assets/rollouts/sg_rollout_step_{step+1:06d}.mp4",
+                    fps=8,
                 )
             except Exception:
                 pass
@@ -237,23 +238,24 @@ def train_loop_ddp(cfg) -> TrainStats:
             else:
                 print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
 
-        # Periodic rollout visualization on rank 0 only
+        # Periodic rollout visualization on rank 0 only (MP4)
         if rank == 0 and ((step == 0) or ((step + 1) % 50 == 0)):
             try:
                 os = __import__("os")
-                os.makedirs("runs/rollouts", exist_ok=True)
+                os.makedirs("assets/rollouts", exist_ok=True)
                 # Wrap local fwd to match (tokens,pos2d,mask)->(loss,logits,cache)
                 def fwd_wrap(tokens, pos2d, mask):
                     l, logits = fwd(tokens, pos2d, mask)
                     return l, logits, None
-                save_rollout_png(
+                save_rollout_mp4(
                     fwd_wrap,
                     rule_bits,
                     H,
                     W,
-                    steps=16,
+                    steps=64,
                     device=device,
-                    savepath=f"runs/rollouts/ddp_step_{step+1:06d}.png",
+                    savepath=f"assets/rollouts/ddp_rollout_step_{step+1:06d}.mp4",
+                    fps=8,
                 )
             except Exception:
                 pass
