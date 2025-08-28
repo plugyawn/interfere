@@ -97,3 +97,119 @@ def train_loop(cfg) -> TrainStats:
 
     return TrainStats(loss=last_loss, acc=last_acc, tokens_per_step=tokens_per_step, tps=tps, secs=secs)
 
+
+def train_loop_ddp(cfg) -> TrainStats:
+    """Multi-GPU DDP training with token-budget scheduling.
+
+    Uses calibration tokens_per_step (single-GPU) to compute steps as:
+    floor(target_tokens / (tokens_per_step * world_size)).
+    """
+    import os
+    import json
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group("nccl")
+
+    device = torch.device(f"cuda:{local_rank}")
+
+    B = cfg.train.batch_per_gpu
+    H, W = cfg.board.H, cfg.board.W
+    vocab = get_default_vocab()
+
+    # Build and wrap model
+    model, _ = build_model(cfg)
+    model = model.to(device)
+    ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+
+    # Optimizer & scheduler
+    opt = AdamW(ddp_model.parameters(), lr=cfg.train.lr, betas=(0.9, 0.95), weight_decay=cfg.train.weight_decay)
+
+    # Read calibration
+    tokens_per_step_single = None
+    try:
+        with open("runs/calibration.json", "r") as f:
+            cal = json.load(f)
+            tokens_per_step_single = int(cal.get("tokens_per_step", 0) or 0)
+    except Exception:
+        pass
+    if not tokens_per_step_single:
+        # Fallback: estimate from sequence length
+        seq_len = 1 + 18 + 1 + H * W + 1 + H * W
+        tokens_per_step_single = B * seq_len
+    tokens_per_step_global = tokens_per_step_single * world_size
+    target_tokens = int(cfg.train.target_tokens)
+    steps = max(target_tokens // max(tokens_per_step_global, 1), 1)
+    warmup = min(cfg.train.warmup_steps, steps // 10 if steps > 0 else 0)
+    sched = CosineAnnealingLR(opt, T_max=max(steps - warmup, 1))
+
+    if rank == 0:
+        est_minutes = (steps * tokens_per_step_single) / max((cal.get("tps", 1e6) if 'cal' in locals() and cal else 1e6), 1e-6) / 60.0
+        print(
+            f"DDP world_size={world_size} global_batch={B*world_size} tokens_per_step={tokens_per_step_global} steps={steps} est_min={est_minutes:.1f}"
+        )
+
+    rule_bits = sb_to_bits({2, 3}, {3})
+
+    last_loss = 0.0
+    last_acc = 0.0
+
+    # Local forward helper using inner model for hooks
+    inner = ddp_model.module
+
+    def fwd(tokens, pos2d, mask):
+        # Re-register hooks each call via run_with_hooks
+        fwd_hooks = []
+        rotary_dim = cfg.model.d_head
+        def rope_single(x, pos2d_local):
+            from ..model.rope2d import apply_rope_2d as rope
+            x2, _ = rope(x, x, pos2d_local, rotary_dim=rotary_dim)
+            return x2
+        def _hq(q, hook):
+            return rope_single(q, pos2d)
+        def _hk(k, hook):
+            return rope_single(k, pos2d)
+        for layer in range(inner.cfg.n_layers):
+            fwd_hooks.append((f"blocks.{layer}.attn.hook_q", _hq))
+            fwd_hooks.append((f"blocks.{layer}.attn.hook_k", _hk))
+        logits = inner.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
+        mask_flat = mask.view(-1).bool()
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1))[mask_flat], tokens.view(-1)[mask_flat])
+        return loss, logits
+
+    for step in range(steps):
+        rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
+        tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab)
+        opt.zero_grad(set_to_none=True)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
+            loss, logits = fwd(tokens, pos2d, mask)
+        loss.backward()
+        opt.step()
+        if step >= warmup:
+            sched.step()
+
+        if rank == 0 and ((step + 1) % 50 == 0 or step == 0):
+            acc = _acc_from_logits(logits.detach(), tokens, mask)
+            last_loss = float(loss.detach().item())
+            last_acc = float(acc)
+            print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+
+    # Save checkpoint (rank 0)
+    if rank == 0:
+        os.makedirs("checkpoints", exist_ok=True)
+        path = "checkpoints/latest.pt"
+        torch.save({
+            "model": inner.state_dict(),
+            "opt": opt.state_dict(),
+            "cfg": cfg.__dict__,
+        }, path)
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+    return TrainStats(loss=last_loss, acc=last_acc, tokens_per_step=tokens_per_step_global, tps=None, secs=None)
