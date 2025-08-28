@@ -21,9 +21,12 @@ def step_model(model_fwd, rule_bits, t, vocab):
     tokens, mask, pos2d = assemble_sequence(rb, t, torch.zeros_like(t), vocab=vocab)
     # We only need logits on t1 segment
     _, logits, _ = model_fwd(tokens, pos2d, mask)
-    T = tokens.shape[1]
-    start = 1 + 18 + 1 + H * W + 1
-    pred = logits.argmax(dim=-1)[:, start : start + H * W].view(B, 1, H, W)
+    # Use next-token logits at the previous position to predict t1 tokens
+    start = 1 + 18 + 1 + H * W + 1  # index of first t1 token in the input
+    # logits[:, p, :] predicts token at p+1
+    logits_for_t1 = logits[:, start - 1 : start - 1 + H * W, :]
+    pred_flat = logits_for_t1.argmax(dim=-1)
+    pred = pred_flat.view(B, 1, H, W)
     return pred
 
 

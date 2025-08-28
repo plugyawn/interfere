@@ -35,8 +35,11 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         normalization_type="LNPre",
         device="cpu",
         dtype=dtype,
+        positional_embedding_type="standard",
     )
     model = HookedTransformer(cfg_tl)
+    # Analysis safety: ensure TL is not applying rotary internally (we add 2D RoPE via hooks)
+    assert model.cfg.positional_embedding_type == "standard", "positional_embedding_type must be 'standard' when using external 2D RoPE hooks"
 
     rotary_dim = mc.d_head
     use_film = bool(getattr(mc, "film", False))
@@ -53,10 +56,10 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         # Prepare forward hooks for all layers
         def make_hook(pos2d_captured, film_params=None):
             def _hook_q(q, hook):
-                return rope_single(q, pos2d_captured)
+                return rope_single(q, pos2d_captured.to(q.device))
 
             def _hook_k(k, hook):
-                return rope_single(k, pos2d_captured)
+                return rope_single(k, pos2d_captured.to(k.device))
             def _hook_resid(x, hook):
                 if film_params is None:
                     return x
@@ -91,15 +94,20 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
             fwd_hooks.append((f"blocks.{layer}.hook_resid_pre", HookR))
 
         logits = model.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
-        # Compute masked cross-entropy on t1 segment (mask==1)
-        target = tokens
-        logits_2d = logits
+        # Next-token prediction: use logits at position t-1 to predict token at position t
+        # Shift by one so we never let a token predict itself.
+        if tokens.size(1) < 2:
+            raise ValueError("Sequence too short for next-token training")
+        logits_shift = logits[:, :-1, :]
+        target_shift = tokens[:, 1:]
+        mask_shift = loss_mask_l[:, 1:]
+        # Safety: first position must never be supervised
+        assert not loss_mask_l[:, 0].any().item(), "loss_mask must be false at position 0"
         if model.cfg.dtype in {torch.float16, torch.bfloat16}:
-            logits_2d = logits_2d.float()
-        # Flatten masked positions
-        mask_flat = loss_mask_l.bool().view(-1)
-        logits_flat = logits_2d.view(-1, logits_2d.size(-1))[mask_flat]
-        target_flat = target.view(-1)[mask_flat]
+            logits_shift = logits_shift.float()
+        mask_flat = mask_shift.reshape(-1).bool()
+        logits_flat = logits_shift.reshape(-1, logits_shift.size(-1))[mask_flat]
+        target_flat = target_shift.reshape(-1)[mask_flat]
         loss = torch.nn.functional.cross_entropy(logits_flat, target_flat)
         cache = None
         return loss, logits, cache

@@ -68,6 +68,8 @@ def train_loop(cfg) -> TrainStats:
     for step in pbar:
         rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
+        if tokens.size(1) > model.cfg.n_ctx:
+            raise RuntimeError(f"Sequence length {tokens.size(1)} exceeds n_ctx {model.cfg.n_ctx}")
         if tokens_per_step is None:
             tokens_per_step = int(tokens.numel())
 
@@ -206,8 +208,18 @@ def train_loop_ddp(cfg) -> TrainStats:
             fwd_hooks.append((f"blocks.{layer}.attn.hook_q", _hq))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_k", _hk))
         logits = inner.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
-        mask_flat = mask.view(-1).bool()
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1))[mask_flat], tokens.view(-1)[mask_flat])
+        # Next-token loss (shift)
+        if tokens.size(1) < 2:
+            raise ValueError("Sequence too short for next-token training")
+        logits_shift = logits[:, :-1, :]
+        target_shift = tokens[:, 1:]
+        mask_shift = mask[:, 1:]
+        assert not mask[:, 0].any().item(), "loss_mask must be false at position 0"
+        mask_flat = mask_shift.reshape(-1).bool()
+        loss = F.cross_entropy(
+            logits_shift.reshape(-1, logits_shift.size(-1))[mask_flat],
+            target_shift.reshape(-1)[mask_flat],
+        )
         return loss, logits
 
     # Progress bar on rank 0 only
@@ -219,6 +231,9 @@ def train_loop_ddp(cfg) -> TrainStats:
     for step in iterator:
         rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
+        # Ensure context length does not exceed model capacity
+        if tokens.size(1) > inner.cfg.n_ctx:
+            raise RuntimeError(f"Sequence length {tokens.size(1)} exceeds n_ctx {inner.cfg.n_ctx}")
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
             loss, logits = fwd(tokens, pos2d, mask)
