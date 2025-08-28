@@ -1,0 +1,1 @@
+.venv/bin/torchrun --standalone --nproc_per_node=2 train.py --config-name exp/life_smoke train.fast=false train.steps=10 hydra.output_subdir=null hydra.run.dir=.
