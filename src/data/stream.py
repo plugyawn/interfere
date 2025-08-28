@@ -155,7 +155,7 @@ def get_default_vocab():
       - '0', '1', '<BOS>', '<SEP>', '<SEP2>'
       - '<R{i}_0>' and '<R{i}_1>' for i in 0..17
     """
-    vocab = {"0": 0, "1": 1, "<BOS>": 2, "<SEP>": 3, "<SEP2>": 4}
+    vocab = {"0": 0, "1": 1, "<BOS>": 2, "<SEP>": 3, "<SEP2>": 4, "<SEP3>": 5, "<SEP4>": 6}
     idx = 5
     for i in range(18):
         vocab[f"<R{i}_0>"] = idx
@@ -165,14 +165,20 @@ def get_default_vocab():
     return vocab
 
 
-def assemble_sequence(rule_bits, t, t1, vocab=None):
+def assemble_sequence(rule_bits, t, t1, vocab=None, multi_steps: int = 0):
     """Assemble prefix-conditioned sequence and loss mask.
 
     Layout: <BOS>, 18×<R*_val>, <SEP>, H*W×t, <SEP2>, H*W×t1
     Returns tokens [B,T], loss_mask [B,T] (1 on t1 segment), pos2d [B,T,2].
     """
     B, _, H, W = t.shape
-    T = 1 + 18 + 1 + H * W + 1 + H * W
+    # Additional segments for multi-steps
+    extra_targets = 0
+    if multi_steps >= 2:
+        extra_targets += 1  # t+2
+    if multi_steps >= 3:
+        extra_targets += 1  # t+3
+    T = 1 + 18 + 1 + H * W + 1 + H * W + extra_targets * (1 + H * W)
     if vocab is None:
         vocab = get_default_vocab()
     # Build token buffer
@@ -211,5 +217,30 @@ def assemble_sequence(rule_bits, t, t1, vocab=None):
     # Loss mask on t1 segment only
     loss_mask[:, i : i + H * W] = True
     i += H * W
+    # t+2 and t+3 segments (optional)
+    if multi_steps >= 2:
+        # compute t2
+        neigh = ToroidalNeighborhood(device=t.device)
+        counts1 = neigh.neighbors(t1.to(torch.float32))
+        rb = rule_bits.to(torch.bool)
+        rbB = rb if rb.dim() == 2 else rb.unsqueeze(0).expand(B, -1)
+        t2 = _apply_rule(t1, counts1, rbB)
+        tokens[:, i] = vocab["<SEP3>"]
+        i += 1
+        tokens[:, i : i + H * W] = t2.view(B, -1)
+        pos2d[:, i : i + H * W, 0] = rows.flatten()
+        pos2d[:, i : i + H * W, 1] = cols.flatten()
+        loss_mask[:, i : i + H * W] = True
+        i += H * W
+        if multi_steps >= 3:
+            counts2 = neigh.neighbors(t2.to(torch.float32))
+            t3 = _apply_rule(t2, counts2, rbB)
+            tokens[:, i] = vocab["<SEP4>"]
+            i += 1
+            tokens[:, i : i + H * W] = t3.view(B, -1)
+            pos2d[:, i : i + H * W, 0] = rows.flatten()
+            pos2d[:, i : i + H * W, 1] = cols.flatten()
+            loss_mask[:, i : i + H * W] = True
+            i += H * W
     assert i == T
     return tokens, loss_mask, pos2d

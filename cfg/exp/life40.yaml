@@ -1,0 +1,13 @@
+defaults:
+  - model: base
+  - train: fast
+  - interp: default
+  - _self_
+
+exp:
+  name: life40
+
+board:
+  H: 40
+  W: 40
+

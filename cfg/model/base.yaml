@@ -24,7 +24,7 @@ train:
   steps: null
   target_tokens: 2.0e8
   seed: 123
+  multi_steps: 0
 
 interp:
   rule_battery: ["S23/B3","S23/B36","B2/S"]
-

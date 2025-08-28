@@ -63,7 +63,7 @@ def train_loop(cfg) -> TrainStats:
 
     for step in range(steps):
         rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
-        tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab)
+        tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         if tokens_per_step is None:
             tokens_per_step = int(tokens.numel())
 
@@ -184,7 +184,7 @@ def train_loop_ddp(cfg) -> TrainStats:
 
     for step in range(steps):
         rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
-        tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab)
+        tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
             loss, logits = fwd(tokens, pos2d, mask)
