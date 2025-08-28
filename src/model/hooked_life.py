@@ -20,7 +20,6 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
     d_vocab = max(vocab.values()) + 1
 
     mc = cfg.model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg_tl = HookedTransformerConfig(
         n_layers=mc.n_layers,
         d_model=mc.d_model,
@@ -32,11 +31,9 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         d_vocab=d_vocab,
         attn_only=False,
         normalization_type="LNPre",
-        device=str(device),
+        device="cpu",
     )
     model = HookedTransformer(cfg_tl)
-    # Move to device (dtype kept default; bf16 handled in later steps if needed)
-    model = model.to(device)
 
     rotary_dim = mc.d_head
     use_film = bool(getattr(mc, "film", False))
@@ -47,9 +44,8 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         return x2
 
     def forward_fn(tokens: torch.Tensor, pos2d: torch.Tensor, loss_mask: torch.Tensor):
-        tokens = tokens.to(device)
-        pos2d = pos2d.to(device)
-        loss_mask_l = loss_mask.to(device)
+        # Assume caller has moved model and tensors to the same device
+        loss_mask_l = loss_mask
 
         # Prepare forward hooks for all layers
         def make_hook(pos2d_captured, film_params=None):

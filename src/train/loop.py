@@ -10,10 +10,12 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm import tqdm
 
 from ..data.rules import sb_to_bits
 from ..data.stream import assemble_sequence, get_default_vocab, make_batch
 from ..model.hooked_life import build_model
+from ..viz.rollout import save_rollout_png
 
 
 @dataclass
@@ -41,6 +43,7 @@ def train_loop(cfg) -> TrainStats:
 
     # Build model
     model, fwd = build_model(cfg)
+    model = model.to(device)
     model.train()
 
     # Optimizer & scheduler
@@ -61,7 +64,8 @@ def train_loop(cfg) -> TrainStats:
     last_loss = 0.0
     last_acc = 0.0
 
-    for step in range(steps):
+    pbar = tqdm(range(steps), desc="train", leave=True)
+    for step in pbar:
         rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         if tokens_per_step is None:
@@ -80,8 +84,26 @@ def train_loop(cfg) -> TrainStats:
         last_acc = float(acc)
         run_log.append({"step": step, "loss": last_loss, "acc": last_acc})
 
-        if (step + 1) % 50 == 0 or step == 0:
-            print(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+        if (step + 1) % 5 == 0 or step == 0:
+            pbar.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}"})
+            pbar.write(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+
+        # Periodic rollout visualization
+        if (step == 0) or ((step + 1) % 50 == 0):
+            try:
+                os = __import__("os")
+                os.makedirs("runs/rollouts", exist_ok=True)
+                save_rollout_png(
+                    fwd,
+                    rule_bits,
+                    H,
+                    W,
+                    steps=16,
+                    device=device,
+                    savepath=f"runs/rollouts/sg_step_{step+1:06d}.png",
+                )
+            except Exception:
+                pass
 
     secs = time.time() - t0
     tps = float(tokens_per_step * steps / max(secs, 1e-6)) if tokens_per_step is not None else None
@@ -171,9 +193,9 @@ def train_loop_ddp(cfg) -> TrainStats:
             x2, _ = rope(x, x, pos2d_local, rotary_dim=rotary_dim)
             return x2
         def _hq(q, hook):
-            return rope_single(q, pos2d)
+            return rope_single(q, pos2d.to(q.device))
         def _hk(k, hook):
-            return rope_single(k, pos2d)
+            return rope_single(k, pos2d.to(k.device))
         for layer in range(inner.cfg.n_layers):
             fwd_hooks.append((f"blocks.{layer}.attn.hook_q", _hq))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_k", _hk))
@@ -182,7 +204,13 @@ def train_loop_ddp(cfg) -> TrainStats:
         loss = F.cross_entropy(logits.view(-1, logits.size(-1))[mask_flat], tokens.view(-1)[mask_flat])
         return loss, logits
 
-    for step in range(steps):
+    # Progress bar on rank 0 only
+    if rank == 0:
+        iterator = tqdm(range(steps), desc="train(ddp)", leave=True)
+    else:
+        iterator = range(steps)
+
+    for step in iterator:
         rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         opt.zero_grad(set_to_none=True)
@@ -193,11 +221,37 @@ def train_loop_ddp(cfg) -> TrainStats:
         if step >= warmup:
             sched.step()
 
-        if rank == 0 and ((step + 1) % 50 == 0 or step == 0):
+        if rank == 0 and ((step + 1) % 5 == 0 or step == 0):
             acc = _acc_from_logits(logits.detach(), tokens, mask)
             last_loss = float(loss.detach().item())
             last_acc = float(acc)
-            print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+            # tqdm.write to avoid breaking the bar
+            if hasattr(iterator, "write"):
+                iterator.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}"})
+                iterator.write(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+            else:
+                print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+
+        # Periodic rollout visualization on rank 0 only
+        if rank == 0 and ((step == 0) or ((step + 1) % 50 == 0)):
+            try:
+                os = __import__("os")
+                os.makedirs("runs/rollouts", exist_ok=True)
+                # Wrap local fwd to match (tokens,pos2d,mask)->(loss,logits,cache)
+                def fwd_wrap(tokens, pos2d, mask):
+                    l, logits = fwd(tokens, pos2d, mask)
+                    return l, logits, None
+                save_rollout_png(
+                    fwd_wrap,
+                    rule_bits,
+                    H,
+                    W,
+                    steps=16,
+                    device=device,
+                    savepath=f"runs/rollouts/ddp_step_{step+1:06d}.png",
+                )
+            except Exception:
+                pass
 
     # Save checkpoint (rank 0)
     if rank == 0:

@@ -1,0 +1,63 @@
+exp:
+  model:
+    model:
+      n_layers: 8
+      d_model: 512
+      n_heads: 8
+      d_head: 64
+      d_mlp: 2048
+      n_ctx: 2100
+      attn_impl: sdpa
+      film: false
+    board:
+      H: 32
+      W: 32
+    train:
+      bf16: true
+      compile:
+        enabled: true
+        scope: block
+      grad_ckpt:
+        mlp_only: true
+      batch_per_gpu: 32
+      grad_accum: 1
+      lr: 0.0003
+      weight_decay: 0.1
+      warmup_steps: 200
+      steps: null
+      target_tokens: 200000000.0
+      seed: 123
+      multi_steps: 0
+    interp:
+      rule_battery:
+      - S23/B3
+      - S23/B36
+      - B2/S
+    n_layers: 2
+    d_model: 256
+    n_heads: 4
+    d_head: 64
+    d_mlp: 1024
+    n_ctx: 600
+  train:
+    train:
+      fast: true
+      compile:
+        enabled: false
+      batch_per_gpu: 16
+      target_tokens: 10000000.0
+    batch_per_gpu: 16
+    target_tokens: 10000000.0
+    compile:
+      enabled: false
+  interp:
+    interp:
+      rule_battery:
+      - S23/B3
+      - S23/B36
+      - B2/S
+  exp:
+    name: life_smoke
+  board:
+    H: 16
+    W: 16

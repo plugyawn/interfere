@@ -1,7 +1,7 @@
 defaults:
-  - model: base
-  - train: fast
-  - interp: default
+  - /model: base
+  - /train: fast
+  - /interp: default
   - _self_
 
 exp:
@@ -36,4 +36,3 @@ train:
 
 interp:
   rule_battery: ["S23/B3","S23/B36","B2/S"]
-
