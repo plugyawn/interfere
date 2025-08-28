@@ -148,11 +148,68 @@ def make_batch(
     return rule_bits, t, t1
 
 
+def get_default_vocab():
+    """Return a simple vocab mapping for tokens used in assembly.
+
+    Tokens:
+      - '0', '1', '<BOS>', '<SEP>', '<SEP2>'
+      - '<R{i}_0>' and '<R{i}_1>' for i in 0..17
+    """
+    vocab = {"0": 0, "1": 1, "<BOS>": 2, "<SEP>": 3, "<SEP2>": 4}
+    idx = 5
+    for i in range(18):
+        vocab[f"<R{i}_0>"] = idx
+        idx += 1
+        vocab[f"<R{i}_1>"] = idx
+        idx += 1
+    return vocab
+
+
 def assemble_sequence(rule_bits, t, t1, vocab=None):
-    """S4 will implement tokenization; placeholder returns minimal tensors."""
+    """Assemble prefix-conditioned sequence and loss mask.
+
+    Layout: <BOS>, 18×<R*_val>, <SEP>, H*W×t, <SEP2>, H*W×t1
+    Returns tokens [B,T], loss_mask [B,T] (1 on t1 segment), pos2d [B,T,2].
+    """
     B, _, H, W = t.shape
     T = 1 + 18 + 1 + H * W + 1 + H * W
-    tokens = torch.zeros((B, T), dtype=torch.long, device=t.device)
-    loss_mask = torch.zeros((B, T), dtype=torch.bool, device=t.device)
+    if vocab is None:
+        vocab = get_default_vocab()
+    # Build token buffer
+    tokens = torch.empty((B, T), dtype=torch.long, device=t.device)
     pos2d = torch.zeros((B, T, 2), dtype=torch.long, device=t.device)
+    loss_mask = torch.zeros((B, T), dtype=torch.bool, device=t.device)
+
+    # Index helpers
+    i = 0
+    tokens[:, i] = vocab["<BOS>"]
+    i += 1
+    # 18 rule tokens
+    rb = rule_bits.to(torch.bool)
+    for b in range(B):
+        for r in range(18):
+            tokens[b, i + r] = vocab[f"<R{r}_1>"] if rb[b, r].item() else vocab[f"<R{r}_0>"]
+    i += 18
+    tokens[:, i] = vocab["<SEP>"]
+    i += 1
+    # t board tokens (row-major)
+    flat_t = t.view(B, -1)
+    tokens[:, i : i + H * W] = flat_t
+    # positions for these tokens
+    rows = torch.arange(H, device=t.device).view(H, 1).expand(H, W)
+    cols = torch.arange(W, device=t.device).view(1, W).expand(H, W)
+    pos2d[:, i : i + H * W, 0] = rows.flatten()
+    pos2d[:, i : i + H * W, 1] = cols.flatten()
+    i += H * W
+    tokens[:, i] = vocab["<SEP2>"]
+    i += 1
+    # t1 board tokens
+    flat_t1 = t1.view(B, -1)
+    tokens[:, i : i + H * W] = flat_t1
+    pos2d[:, i : i + H * W, 0] = rows.flatten()
+    pos2d[:, i : i + H * W, 1] = cols.flatten()
+    # Loss mask on t1 segment only
+    loss_mask[:, i : i + H * W] = True
+    i += H * W
+    assert i == T
     return tokens, loss_mask, pos2d
