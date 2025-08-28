@@ -1,0 +1,26 @@
+defaults:
+  - model: base
+  - train: fast
+  - interp: default
+  - _self_
+
+exp:
+  name: life_smoke
+
+board:
+  H: 16
+  W: 16
+
+model:
+  n_layers: 2
+  d_model: 256
+  n_heads: 4
+  d_head: 64
+  d_mlp: 1024
+  n_ctx: 600
+
+train:
+  batch_per_gpu: 16
+  target_tokens: 1.0e7
+  compile: {enabled: false}
+

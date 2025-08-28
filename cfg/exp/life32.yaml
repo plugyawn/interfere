@@ -1,0 +1,39 @@
+defaults:
+  - model: base
+  - train: fast
+  - interp: default
+  - _self_
+
+exp:
+  name: life32
+
+board:
+  H: 32
+  W: 32
+
+model:
+  n_layers: 8
+  d_model: 512
+  n_heads: 8
+  d_head: 64
+  d_mlp: 2048
+  n_ctx: 2100
+  attn_impl: sdpa
+  film: false
+
+train:
+  bf16: true
+  compile: {enabled: true, scope: "block"}
+  grad_ckpt: {mlp_only: true}
+  batch_per_gpu: 32
+  grad_accum: 1
+  lr: 3e-4
+  weight_decay: 0.1
+  warmup_steps: 200
+  steps: null
+  target_tokens: 2.0e8
+  seed: 123
+
+interp:
+  rule_battery: ["S23/B3","S23/B36","B2/S"]
+
