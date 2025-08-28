@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -74,6 +75,12 @@ def train_loop(cfg) -> TrainStats:
     last_loss = 0.0
     last_acc = 0.0
 
+    # Tag this run to avoid overwriting rollouts
+    run_id = time.strftime("%Y%m%d_%H%M%S")
+    roll_dir = os.path.join("assets", "rollouts", run_id)
+    os.makedirs(roll_dir, exist_ok=True)
+    print(f"Rollouts will be saved under: {roll_dir}")
+
     pbar = tqdm(range(steps), desc="train", leave=True)
     for step in pbar:
         rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
@@ -126,8 +133,7 @@ def train_loop(cfg) -> TrainStats:
         # Periodic rollout visualization (MP4, longer autoregressive rollout)
         if (step == 0) or ((step + 1) % 50 == 0):
             try:
-                os = __import__("os")
-                os.makedirs("assets/rollouts", exist_ok=True)
+                os.makedirs(roll_dir, exist_ok=True)
                 save_rollout_mp4(
                     fwd,
                     rule_bits,
@@ -135,7 +141,7 @@ def train_loop(cfg) -> TrainStats:
                     W,
                     steps=64,
                     device=device,
-                    savepath=f"assets/rollouts/sg_rollout_step_{step+1:06d}.mp4",
+                    savepath=os.path.join(roll_dir, f"sg_rollout_step_{step+1:06d}.mp4"),
                     fps=8,
                 )
             except Exception:
@@ -145,7 +151,6 @@ def train_loop(cfg) -> TrainStats:
     tps = float(tokens_per_step * steps / max(secs, 1e-6)) if tokens_per_step is not None else None
 
     # Persist minimal logs
-    os = __import__("os")
     os.makedirs("runs", exist_ok=True)
     with open("runs/train_smoke.jsonl", "a") as f:
         for r in run_log:
@@ -162,7 +167,6 @@ def train_loop_ddp(cfg) -> TrainStats:
     Uses calibration tokens_per_step (single-GPU) to compute steps as:
     floor(target_tokens / (tokens_per_step * world_size)).
     """
-    import os
     import json
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP
@@ -256,6 +260,12 @@ def train_loop_ddp(cfg) -> TrainStats:
         )
         return loss, logits
 
+    # Tag this run and progress bar on rank 0 only
+    run_id = time.strftime("%Y%m%d_%H%M%S")
+    roll_dir = os.path.join("assets", "rollouts", run_id)
+    if rank == 0:
+        os.makedirs(roll_dir, exist_ok=True)
+        print(f"Rollouts will be saved under: {roll_dir}")
     # Progress bar on rank 0 only
     if rank == 0:
         iterator = tqdm(range(steps), desc="train(ddp)", leave=True)
@@ -313,8 +323,7 @@ def train_loop_ddp(cfg) -> TrainStats:
         # Periodic rollout visualization on rank 0 only (MP4)
         if rank == 0 and ((step == 0) or ((step + 1) % 50 == 0)):
             try:
-                os = __import__("os")
-                os.makedirs("assets/rollouts", exist_ok=True)
+                os.makedirs(roll_dir, exist_ok=True)
                 # Wrap local fwd to match (tokens,pos2d,mask)->(loss,logits,cache)
                 def fwd_wrap(tokens, pos2d, mask):
                     l, logits = fwd(tokens, pos2d, mask)
@@ -326,7 +335,7 @@ def train_loop_ddp(cfg) -> TrainStats:
                     W,
                     steps=64,
                     device=device,
-                    savepath=f"assets/rollouts/ddp_rollout_step_{step+1:06d}.mp4",
+                    savepath=os.path.join(roll_dir, f"ddp_rollout_step_{step+1:06d}.mp4"),
                     fps=8,
                 )
             except Exception:
