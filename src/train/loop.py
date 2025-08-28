@@ -18,6 +18,16 @@ from ..model.hooked_life import build_model
 from ..viz.rollout import save_rollout_png, save_rollout_mp4
 
 
+def _sched_sampling_prob(step: int, start: int, end: int, p_max: float) -> float:
+    if end <= start:
+        return float(p_max)
+    if step <= start:
+        return 0.0
+    if step >= end:
+        return float(p_max)
+    return float(p_max) * float(step - start) / max(float(end - start), 1.0)
+
+
 @dataclass
 class TrainStats:
     loss: float
@@ -75,7 +85,30 @@ def train_loop(cfg) -> TrainStats:
 
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
-            loss, logits, _ = fwd(tokens, pos2d, mask)
+            # Curriculum: scheduled sampling on t+1 inputs
+            ss_cfg = getattr(cfg.train, "curriculum", {})
+            use_ss = bool(getattr(ss_cfg, "enabled", False))
+            if use_ss:
+                p_max = float(getattr(ss_cfg, "p_max", 0.5))
+                s_start = int(getattr(ss_cfg, "start", 0))
+                s_end = int(getattr(ss_cfg, "end", max(steps // 2, 1)))
+                p = _sched_sampling_prob(step, s_start, s_end, p_max)
+            else:
+                p = 0.0
+            if p <= 0.0:
+                loss, logits, _ = fwd(tokens, pos2d, mask)
+            else:
+                with torch.no_grad():
+                    _, logits0, _ = fwd(tokens, pos2d, mask)
+                HxW = H * W
+                start_t1 = 1 + 18 + 1 + HxW + 1
+                end_t1 = start_t1 + HxW
+                assert end_t1 <= tokens.size(1), "invalid t+1 segment bounds"
+                preds = logits0[:, start_t1 - 1 : end_t1 - 1, :].argmax(dim=-1)
+                bern = (torch.rand_like(preds, dtype=torch.float32) < p)
+                tokens_aug = tokens.clone()
+                tokens_aug[:, start_t1:end_t1] = torch.where(bern, preds, tokens[:, start_t1:end_t1])
+                loss, logits, _ = fwd(tokens_aug, pos2d, mask, labels_tokens=tokens)
         loss.backward()
         opt.step()
         if step >= warmup:
@@ -192,7 +225,7 @@ def train_loop_ddp(cfg) -> TrainStats:
     # Local forward helper using inner model for hooks
     inner = ddp_model.module
 
-    def fwd(tokens, pos2d, mask):
+    def fwd(tokens, pos2d, mask, labels_tokens=None):
         # Re-register hooks each call via run_with_hooks
         fwd_hooks = []
         rotary_dim = cfg.model.d_head
@@ -212,7 +245,8 @@ def train_loop_ddp(cfg) -> TrainStats:
         if tokens.size(1) < 2:
             raise ValueError("Sequence too short for next-token training")
         logits_shift = logits[:, :-1, :]
-        target_shift = tokens[:, 1:]
+        target_src = tokens if labels_tokens is None else labels_tokens
+        target_shift = target_src[:, 1:]
         mask_shift = mask[:, 1:]
         assert not mask[:, 0].any().item(), "loss_mask must be false at position 0"
         mask_flat = mask_shift.reshape(-1).bool()
@@ -236,7 +270,30 @@ def train_loop_ddp(cfg) -> TrainStats:
             raise RuntimeError(f"Sequence length {tokens.size(1)} exceeds n_ctx {inner.cfg.n_ctx}")
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
-            loss, logits = fwd(tokens, pos2d, mask)
+            # Curriculum: scheduled sampling on t+1 inputs
+            ss_cfg = getattr(cfg.train, "curriculum", {})
+            use_ss = bool(getattr(ss_cfg, "enabled", False))
+            if use_ss:
+                p_max = float(getattr(ss_cfg, "p_max", 0.5))
+                s_start = int(getattr(ss_cfg, "start", 0))
+                s_end = int(getattr(ss_cfg, "end", max(steps // 2, 1)))
+                p = _sched_sampling_prob(step, s_start, s_end, p_max)
+            else:
+                p = 0.0
+            if p <= 0.0:
+                loss, logits = fwd(tokens, pos2d, mask)
+            else:
+                with torch.no_grad():
+                    _, logits0 = fwd(tokens, pos2d, mask)
+                HxW = H * W
+                start_t1 = 1 + 18 + 1 + HxW + 1
+                end_t1 = start_t1 + HxW
+                assert end_t1 <= tokens.size(1), "invalid t+1 segment bounds"
+                preds = logits0[:, start_t1 - 1 : end_t1 - 1, :].argmax(dim=-1)
+                bern = (torch.rand_like(preds, dtype=torch.float32) < p)
+                tokens_aug = tokens.clone()
+                tokens_aug[:, start_t1:end_t1] = torch.where(bern, preds, tokens[:, start_t1:end_t1])
+                loss, logits = fwd(tokens_aug, pos2d, mask, labels_tokens=tokens)
         loss.backward()
         opt.step()
         if step >= warmup:

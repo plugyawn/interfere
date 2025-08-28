@@ -19,13 +19,11 @@ model:
   d_head: 64
   d_mlp: 2048
   n_ctx: 2100
-  attn_impl: sdpa
   film: false
 
 train:
   bf16: true
   compile: {enabled: true, scope: "block"}
-  grad_ckpt: {mlp_only: true}
   batch_per_gpu: 32
   grad_accum: 1
   lr: 3e-4
@@ -34,6 +32,7 @@ train:
   steps: null
   target_tokens: 2.0e8
   seed: 123
+  curriculum: {enabled: true, p_max: 0.5, start: 0, end: 5000}
 
 interp:
   rule_battery: ["S23/B3","S23/B36","B2/S"]

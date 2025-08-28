@@ -24,3 +24,4 @@ train:
   batch_per_gpu: 16
   target_tokens: 1.0e7
   compile: {enabled: false}
+  curriculum: {enabled: true, p_max: 0.5, start: 0, end: 200}

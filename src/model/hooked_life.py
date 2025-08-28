@@ -49,7 +49,7 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         x2, _ = apply_rope_2d(x, x, pos2d_local, rotary_dim=rotary_dim)
         return x2
 
-    def forward_fn(tokens: torch.Tensor, pos2d: torch.Tensor, loss_mask: torch.Tensor):
+    def forward_fn(tokens: torch.Tensor, pos2d: torch.Tensor, loss_mask: torch.Tensor, labels_tokens: torch.Tensor | None = None):
         # Assume caller has moved model and tensors to the same device
         loss_mask_l = loss_mask
 
@@ -99,7 +99,9 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         if tokens.size(1) < 2:
             raise ValueError("Sequence too short for next-token training")
         logits_shift = logits[:, :-1, :]
-        target_shift = tokens[:, 1:]
+        # Allow supplying separate labels to support scheduled sampling / curriculum
+        labels_src = labels_tokens if labels_tokens is not None else tokens
+        target_shift = labels_src[:, 1:]
         mask_shift = loss_mask_l[:, 1:]
         # Safety: first position must never be supervised
         assert not loss_mask_l[:, 0].any().item(), "loss_mask must be false at position 0"
