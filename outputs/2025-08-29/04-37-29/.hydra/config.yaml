@@ -1,4 +1,3 @@
-# @package _global_
 model:
   n_layers: 8
   d_model: 512
@@ -8,24 +7,35 @@ model:
   n_ctx: 2100
   attn_impl: sdpa
   film: false
-
 board:
   H: 32
   W: 32
-
 train:
   bf16: true
-  compile: {enabled: true, scope: "block"}
-  grad_ckpt: {mlp_only: true}
+  compile:
+    enabled: true
+    scope: block
+  grad_ckpt:
+    mlp_only: true
   batch_per_gpu: 32
   grad_accum: 1
-  lr: 3e-4
+  lr: 0.0003
   weight_decay: 0.1
   warmup_steps: 200
   steps: null
-  target_tokens: 2.0e8
+  target_tokens: 200000000.0
   seed: 123
   multi_steps: 0
-
+  fast: true
 interp:
-  rule_battery: ["S23/B3","S23/B36","B2/S"]
+  rule_battery:
+  - S23/B3
+  - S23/B36
+  - B2/S
+  interp:
+    rule_battery:
+    - S23/B3
+    - S23/B36
+    - B2/S
+exp:
+  name: life32

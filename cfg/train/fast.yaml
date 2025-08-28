@@ -1,6 +1,4 @@
-train:
-  fast: true
-  compile: {enabled: false}
-  batch_per_gpu: 16
-  target_tokens: 1.0e7
-
+fast: true
+compile: {enabled: false}
+batch_per_gpu: 16
+target_tokens: 1.0e7

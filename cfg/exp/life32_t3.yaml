@@ -6,7 +6,7 @@ defaults:
   - _self_
 
 exp:
-  name: life32
+  name: life32_t3
 
 board:
   H: 32
@@ -18,7 +18,7 @@ model:
   n_heads: 8
   d_head: 64
   d_mlp: 2048
-  n_ctx: 2100
+  n_ctx: 5000   # >= 4119 needed for t+3 on 32x32
   attn_impl: sdpa
   film: false
 
@@ -26,7 +26,7 @@ train:
   bf16: true
   compile: {enabled: true, scope: "block"}
   grad_ckpt: {mlp_only: true}
-  batch_per_gpu: 32
+  batch_per_gpu: 1        # very conservative for long-seq attention
   grad_accum: 1
   lr: 3e-4
   weight_decay: 0.1
@@ -34,6 +34,7 @@ train:
   steps: null
   target_tokens: 2.0e8
   seed: 123
+  multi_steps: 3          # enable t+1, t+2, t+3 targets
 
 interp:
   rule_battery: ["S23/B3","S23/B36","B2/S"]

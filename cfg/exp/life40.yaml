@@ -1,7 +1,8 @@
+# @package _global_
 defaults:
-  - model: base
-  - train: fast
-  - interp: default
+  - /model: base
+  - /train: fast
+  - /interp: default
   - _self_
 
 exp:
@@ -10,4 +11,3 @@ exp:
 board:
   H: 40
   W: 40
-

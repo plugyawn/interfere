@@ -165,8 +165,13 @@ def train_loop_ddp(cfg) -> TrainStats:
         seq_len = 1 + 18 + 1 + H * W + 1 + H * W
         tokens_per_step_single = B * seq_len
     tokens_per_step_global = tokens_per_step_single * world_size
-    target_tokens = int(cfg.train.target_tokens)
-    steps = max(target_tokens // max(tokens_per_step_global, 1), 1)
+    # Honor explicit step override if provided; else compute from token budget
+    explicit_steps = getattr(cfg.train, "steps", None)
+    if explicit_steps is not None and int(explicit_steps) > 0:
+        steps = int(explicit_steps)
+    else:
+        target_tokens = int(cfg.train.target_tokens)
+        steps = max(target_tokens // max(tokens_per_step_global, 1), 1)
     warmup = min(cfg.train.warmup_steps, steps // 10 if steps > 0 else 0)
     sched = CosineAnnealingLR(opt, T_max=max(steps - warmup, 1))
 

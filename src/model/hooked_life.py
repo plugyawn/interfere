@@ -20,6 +20,8 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
     d_vocab = max(vocab.values()) + 1
 
     mc = cfg.model
+    # Set dtype based on training precision preference
+    dtype = torch.bfloat16 if bool(getattr(getattr(cfg, "train", {}), "bf16", False)) else torch.float32
     cfg_tl = HookedTransformerConfig(
         n_layers=mc.n_layers,
         d_model=mc.d_model,
@@ -32,6 +34,7 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         attn_only=False,
         normalization_type="LNPre",
         device="cpu",
+        dtype=dtype,
     )
     model = HookedTransformer(cfg_tl)
 
