@@ -1,0 +1,24 @@
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Project artifacts
+runs/
+checkpoints/
+wandb/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Build
+build/
+dist/
+*.egg-info/
+
