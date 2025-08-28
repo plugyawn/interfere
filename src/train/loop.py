@@ -46,6 +46,34 @@ def _acc_from_logits(logits: torch.Tensor, tokens: torch.Tensor, mask: torch.Ten
     return correct / max(total, 1)
 
 
+def _target_segment_bounds(H: int, W: int, multi_steps: int) -> list[tuple[int, int]]:
+    """Return [(start,end)] (half-open) indices for each supervised target segment.
+
+    Layout: <BOS>, 18 rule, <SEP>, H*W (t), <SEP2>, H*W (t+1), [<SEP3>, H*W (t+2), ...]
+    """
+    HxW = H * W
+    i = 0
+    i += 1              # BOS
+    i += 18             # rule
+    i += 1              # SEP
+    i += HxW            # t
+    i += 1              # SEP2
+    bounds = []
+    # t+1
+    start = i
+    end = i + HxW
+    bounds.append((start, end))
+    i = end
+    if multi_steps >= 2:
+        i += 1          # SEP3
+        bounds.append((i, i + HxW))
+        i += HxW
+        if multi_steps >= 3:
+            i += 1      # SEP4
+            bounds.append((i, i + HxW))
+    return bounds
+
+
 def train_loop(cfg) -> TrainStats:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     B = cfg.train.batch_per_gpu
@@ -92,30 +120,12 @@ def train_loop(cfg) -> TrainStats:
 
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
-            # Curriculum: scheduled sampling on t+1 inputs
-            ss_cfg = getattr(cfg.train, "curriculum", {})
-            use_ss = bool(getattr(ss_cfg, "enabled", False))
-            if use_ss:
-                p_max = float(getattr(ss_cfg, "p_max", 0.5))
-                s_start = int(getattr(ss_cfg, "start", 0))
-                s_end = int(getattr(ss_cfg, "end", max(steps // 2, 1)))
-                p = _sched_sampling_prob(step, s_start, s_end, p_max)
-            else:
-                p = 0.0
-            if p <= 0.0:
-                loss, logits, _ = fwd(tokens, pos2d, mask)
-            else:
-                with torch.no_grad():
-                    _, logits0, _ = fwd(tokens, pos2d, mask)
-                HxW = H * W
-                start_t1 = 1 + 18 + 1 + HxW + 1
-                end_t1 = start_t1 + HxW
-                assert end_t1 <= tokens.size(1), "invalid t+1 segment bounds"
-                preds = logits0[:, start_t1 - 1 : end_t1 - 1, :].argmax(dim=-1)
-                bern = (torch.rand_like(preds, dtype=torch.float32) < p)
-                tokens_aug = tokens.clone()
-                tokens_aug[:, start_t1:end_t1] = torch.where(bern, preds, tokens[:, start_t1:end_t1])
-                loss, logits, _ = fwd(tokens_aug, pos2d, mask, labels_tokens=tokens)
+            # Train under inference-like inputs: zero out future target segments in the input
+            tokens_in = tokens.clone()
+            for s, e in _target_segment_bounds(H, W, getattr(cfg.train, "multi_steps", 0)):
+                assert e <= tokens.size(1), "target segment bounds exceed sequence length"
+                tokens_in[:, s:e] = 0
+            loss, logits, _ = fwd(tokens_in, pos2d, mask, labels_tokens=tokens)
         loss.backward()
         opt.step()
         if step >= warmup:
@@ -280,30 +290,11 @@ def train_loop_ddp(cfg) -> TrainStats:
             raise RuntimeError(f"Sequence length {tokens.size(1)} exceeds n_ctx {inner.cfg.n_ctx}")
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
-            # Curriculum: scheduled sampling on t+1 inputs
-            ss_cfg = getattr(cfg.train, "curriculum", {})
-            use_ss = bool(getattr(ss_cfg, "enabled", False))
-            if use_ss:
-                p_max = float(getattr(ss_cfg, "p_max", 0.5))
-                s_start = int(getattr(ss_cfg, "start", 0))
-                s_end = int(getattr(ss_cfg, "end", max(steps // 2, 1)))
-                p = _sched_sampling_prob(step, s_start, s_end, p_max)
-            else:
-                p = 0.0
-            if p <= 0.0:
-                loss, logits = fwd(tokens, pos2d, mask)
-            else:
-                with torch.no_grad():
-                    _, logits0 = fwd(tokens, pos2d, mask)
-                HxW = H * W
-                start_t1 = 1 + 18 + 1 + HxW + 1
-                end_t1 = start_t1 + HxW
-                assert end_t1 <= tokens.size(1), "invalid t+1 segment bounds"
-                preds = logits0[:, start_t1 - 1 : end_t1 - 1, :].argmax(dim=-1)
-                bern = (torch.rand_like(preds, dtype=torch.float32) < p)
-                tokens_aug = tokens.clone()
-                tokens_aug[:, start_t1:end_t1] = torch.where(bern, preds, tokens[:, start_t1:end_t1])
-                loss, logits = fwd(tokens_aug, pos2d, mask, labels_tokens=tokens)
+            tokens_in = tokens.clone()
+            for s, e in _target_segment_bounds(H, W, getattr(cfg.train, "multi_steps", 0)):
+                assert e <= tokens.size(1), "target segment bounds exceed sequence length"
+                tokens_in[:, s:e] = 0
+            loss, logits = fwd(tokens_in, pos2d, mask, labels_tokens=tokens)
         loss.backward()
         opt.step()
         if step >= warmup:
