@@ -24,6 +24,12 @@ def _predict_next(fwd: Callable, rb: torch.Tensor, t: torch.Tensor) -> torch.Ten
     vocab = get_default_vocab()
     B, _, H, W = t.shape
     tokens, mask, pos2d = assemble_sequence(rb.expand(B, -1), t, torch.zeros_like(t), vocab=vocab)
+    # Replace t+1 inputs with [MASK] for inference-like context
+    H, W = t.shape[-2], t.shape[-1]
+    start = 1 + 18 + 1 + H * W + 1
+    end = start + H * W
+    if "<MASK>" in vocab:
+        tokens[:, start:end] = vocab["<MASK>"]
     out = fwd(tokens, pos2d, mask)
     logits = out[1]  # supports both 2- and 3-tuple
     start = 1 + 18 + 1 + H * W + 1

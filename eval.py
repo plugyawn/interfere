@@ -19,6 +19,12 @@ def step_model(model_fwd, rule_bits, t, vocab):
     B, _, H, W = t.shape
     rb = rule_bits.expand(B, -1)
     tokens, mask, pos2d = assemble_sequence(rb, t, torch.zeros_like(t), vocab=vocab)
+    # Replace target segment inputs with [MASK] for inference-like context
+    H, W = t.shape[-2], t.shape[-1]
+    start = 1 + 18 + 1 + H * W + 1
+    end = start + H * W
+    if "<MASK>" in vocab:
+        tokens[:, start:end] = vocab["<MASK>"]
     # We only need logits on t1 segment
     _, logits, _ = model_fwd(tokens, pos2d, mask)
     # Use next-token logits at the previous position to predict t1 tokens

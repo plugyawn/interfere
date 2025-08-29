@@ -139,11 +139,12 @@ def train_loop(cfg) -> TrainStats:
 
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
-            # Train under inference-like inputs: zero out future target segments in the input
+            # Train under inference-like inputs: mask out future target segments in the input
             tokens_in = tokens.clone()
+            mask_id = int(vocab.get("<MASK>", vocab["0"]))
             for s, e in _target_segment_bounds(H, W, getattr(cfg.train, "multi_steps", 0)):
                 assert e <= tokens.size(1), "target segment bounds exceed sequence length"
-                tokens_in[:, s:e] = 0
+                tokens_in[:, s:e] = mask_id
             loss, logits, _ = fwd(tokens_in, pos2d, mask, labels_tokens=tokens)
         loss.backward()
         # Gradient clipping
@@ -369,9 +370,10 @@ def train_loop_ddp(cfg) -> TrainStats:
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=getattr(cfg.train, "bf16", True)):
             tokens_in = tokens.clone()
+            mask_id = int(vocab.get("<MASK>", vocab["0"]))
             for s, e in _target_segment_bounds(H, W, getattr(cfg.train, "multi_steps", 0)):
                 assert e <= tokens.size(1), "target segment bounds exceed sequence length"
-                tokens_in[:, s:e] = 0
+                tokens_in[:, s:e] = mask_id
             loss, logits = fwd(tokens_in, pos2d, mask, labels_tokens=tokens)
         loss.backward()
         # Gradient clipping

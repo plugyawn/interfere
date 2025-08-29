@@ -186,6 +186,8 @@ def get_default_vocab():
         idx += 1
         vocab[f"<R{i}_1>"] = idx
         idx += 1
+    # Add a dedicated unknown/mask token for target placeholders
+    vocab["<MASK>"] = max(vocab.values()) + 1
     return vocab
 
 
