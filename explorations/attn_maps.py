@@ -16,7 +16,7 @@ import sys
 if __package__ is None or __package__ == "":
     import os as _os
     sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
-from explorations.utils import load_cfg, load_model, make_example, out_dir, build_trainlike_hooks
+from explorations.utils import load_cfg, load_model, make_example, out_dir, build_trainlike_hooks, mask_targets_like_train
 from src.model.rope2d import apply_rope_2d
 
 
@@ -96,8 +96,9 @@ def main():
     def _cap_resid(x, hook):
         box["resid_pre"] = x.detach().cpu()
     # Ensure we include train-like masking & segment embedding on all layers for faithful geometry
-    base_hooks = build_trainlike_hooks(cfg, model, ex.pos2d, ex.tokens)
-    model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=base_hooks + [(scores_name, _capture_scores), (name_resid, _cap_resid)])
+    tokens_in0 = mask_targets_like_train(ex.tokens, ex.vocab, cfg)
+    base_hooks = build_trainlike_hooks(cfg, model, ex.pos2d, tokens_in0)
+    model.run_with_hooks(tokens_in0, return_type=None, fwd_hooks=base_hooks + [(scores_name, _capture_scores), (name_resid, _cap_resid)])
     scores = box["scores"]  # [B,H,Q,K]
     resid_pre = box.get("resid_pre")  # [B,T,D] (may be None if not captured)
 
@@ -196,14 +197,13 @@ def main():
                 box2_res = {}
                 def _cap_res2(x, hook):
                     box2_res["resid_pre"] = x.detach().cpu()
-                hooks2 = [
-                    (f"blocks.{L}.attn.hook_q", _hq),
-                    (f"blocks.{L}.attn.hook_k", _hk),
-                ]
-                cap_hooks = hooks2 + [(scores_name2, _cap2)]
+                # Use the same train-like hooks for all layers; just add layer-specific capture
+                tokens_inL = tokens_in0  # identical masking
+                base_hooks_L = build_trainlike_hooks(cfg, model, ex.pos2d, tokens_inL)
+                cap_hooks = base_hooks_L + [(scores_name2, _cap2)]
                 if args.mode == "contrib":
                     cap_hooks += [(name_resid2, _cap_res2)]
-                model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=cap_hooks)
+                model.run_with_hooks(tokens_inL, return_type=None, fwd_hooks=cap_hooks)
                 sc = box2["scores"]
                 resL = box2_res.get("resid_pre") if args.mode == "contrib" else None
                 arr = build_map_for(L, head, sc, resL)
