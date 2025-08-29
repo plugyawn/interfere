@@ -60,6 +60,20 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
 
             def _hook_k(k, hook):
                 return rope_single(k, pos2d_captured.to(k.device))
+            def _hook_scores(scores, hook):
+                # Restrict queries in target segments to attend only up to end of t segment
+                B, Hh, Q, K = scores.shape
+                H, W = cfg.board.H, cfg.board.W
+                HxW = H * W
+                start_t1 = 1 + 18 + 1 + HxW + 1
+                # allow keys strictly before start_t1
+                allowed_k = torch.zeros((K,), dtype=torch.bool, device=scores.device)
+                allowed_k[: start_t1 - 1] = True  # upto last t token (exclude SEP2)
+                q_in_target = torch.zeros((Q,), dtype=torch.bool, device=scores.device)
+                q_in_target[start_t1:] = True
+                bad = q_in_target[:, None] & (~allowed_k)[None, :]
+                scores = scores.masked_fill(bad.unsqueeze(0).unsqueeze(0), torch.finfo(scores.dtype).min)
+                return scores
             def _hook_resid(x, hook):
                 if film_params is None:
                     return x
@@ -72,7 +86,7 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
                 y = x32 * g + b
                 return y.to(x.dtype)
 
-            return _hook_q, _hook_k, _hook_resid
+            return _hook_q, _hook_k, _hook_resid, _hook_scores
 
         fwd_hooks: List[Tuple[str, Any]] = []
         film_params = None
@@ -87,11 +101,12 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
                     rb[i_b, r] = 1.0 if tid == vocab[f"<R{r}_1>"] else 0.0
             gamma, beta = film_module(rb)
             film_params = (gamma, beta)
-        HookQ, HookK, HookR = make_hook(pos2d, film_params)
+        HookQ, HookK, HookR, HookS = make_hook(pos2d, film_params)
         for layer in range(model.cfg.n_layers):
             fwd_hooks.append((f"blocks.{layer}.attn.hook_q", HookQ))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_k", HookK))
             fwd_hooks.append((f"blocks.{layer}.hook_resid_pre", HookR))
+            fwd_hooks.append((f"blocks.{layer}.attn.hook_attn_scores", HookS))
 
         logits = model.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
         # Next-token prediction: use logits at position t-1 to predict token at position t

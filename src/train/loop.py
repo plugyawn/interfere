@@ -251,9 +251,21 @@ def train_loop_ddp(cfg) -> TrainStats:
             return rope_single(q, pos2d.to(q.device))
         def _hk(k, hook):
             return rope_single(k, pos2d.to(k.device))
+        def _hs(scores, hook):
+            B2, Hh, Q, K = scores.shape
+            HxW = H * W
+            start_t1 = 1 + 18 + 1 + HxW + 1
+            allowed_k = torch.zeros((K,), dtype=torch.bool, device=scores.device)
+            allowed_k[: start_t1 - 1] = True
+            q_in_target = torch.zeros((Q,), dtype=torch.bool, device=scores.device)
+            q_in_target[start_t1:] = True
+            bad = q_in_target[:, None] & (~allowed_k)[None, :]
+            scores = scores.masked_fill(bad.unsqueeze(0).unsqueeze(0), torch.finfo(scores.dtype).min)
+            return scores
         for layer in range(inner.cfg.n_layers):
             fwd_hooks.append((f"blocks.{layer}.attn.hook_q", _hq))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_k", _hk))
+            fwd_hooks.append((f"blocks.{layer}.attn.hook_attn_scores", _hs))
         logits = inner.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
         # Next-token loss (shift)
         if tokens.size(1) < 2:
