@@ -164,7 +164,8 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
             idx1 = int(vocab["1"])
             logits_bin = logits_2d[..., [idx0, idx1]]
             logits_flat = logits_bin.reshape(-1, 2)[mask_flat]
-            target_flat = labels_src.reshape(-1)[mask_flat]
+            target_flat_raw = labels_src.reshape(-1)[mask_flat]
+            target_flat = (target_flat_raw != 0).to(torch.long)
             pos_w = float(getattr(bh, "pos_weight", 1.0) or 1.0)
             weight = None
             if abs(pos_w - 1.0) > 1e-8:

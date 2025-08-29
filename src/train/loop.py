@@ -53,10 +53,16 @@ def _auc_from_logits(logits: torch.Tensor, tokens: torch.Tensor, mask: torch.Ten
         with torch.no_grad():
             idx0 = int(vocab["0"])  # type: ignore[index]
             idx1 = int(vocab["1"])  # type: ignore[index]
-            sel = logits[..., [idx0, idx1]]
+            sel = logits.detach().float()[..., [idx0, idx1]]
             probs1 = torch.softmax(sel, dim=-1)[..., 1]
-            y_true = tokens[mask].detach().reshape(-1).cpu().numpy().astype(np.int32)
-            y_score = probs1[mask].detach().reshape(-1).cpu().numpy().astype(np.float64)
+            y_true_t = tokens[mask].detach().reshape(-1)
+            y_score_t = probs1[mask].detach().reshape(-1)
+            # Filter non-finite scores
+            finite = torch.isfinite(y_score_t)
+            if finite.sum().item() == 0:
+                return float("nan")
+            y_true = y_true_t[finite].cpu().numpy().astype(np.int32)
+            y_score = y_score_t[finite].cpu().numpy().astype(np.float64)
             order = np.argsort(-y_score)
             y_true = y_true[order]
             P = (y_true == 1).sum()
@@ -189,14 +195,19 @@ def train_loop(cfg) -> TrainStats:
 
         acc = _acc_from_logits(logits.detach(), tokens, mask)
         auc = _auc_from_logits(logits.detach(), tokens, mask, vocab)
+        # Class balance insight for target slice
+        with torch.no_grad():
+            y_m = tokens[mask]
+            pos_ct = int((y_m == 1).sum().item())
+            neg_ct = int((y_m == 0).sum().item())
         last_loss = float(loss.detach().item())
         last_acc = float(acc)
         last_auc = float(auc)
-        run_log.append({"step": step, "loss": last_loss, "acc": last_acc, "auc": last_auc})
+        run_log.append({"step": step, "loss": last_loss, "acc": last_acc, "auc": last_auc, "pos": pos_ct, "neg": neg_ct})
 
         if (step + 1) % 5 == 0 or step == 0:
             pbar.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}", "auc": f"{last_auc:.4f}"})
-            pbar.write(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f}")
+            pbar.write(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f} pos_neg=({pos_ct},{neg_ct})")
 
         # Periodic rollout visualization (MP4, longer autoregressive rollout)
         if (step == 0) or ((step + 1) % 50 == 0):
@@ -380,7 +391,9 @@ def train_loop_ddp(cfg) -> TrainStats:
             idx1 = int(vocab["1"])
             logits_bin = logits_2d[..., [idx0, idx1]]
             logits_flat = logits_bin.reshape(-1, 2)[mask_flat]
-            target_flat = target_src.reshape(-1)[mask_flat]
+            target_flat_raw = target_src.reshape(-1)[mask_flat]
+            # Map any stray values to {0,1}
+            target_flat = (target_flat_raw != 0).to(torch.long)
             pos_w = float(getattr(bh, "pos_weight", 1.0) or 1.0)
             weight = None
             if abs(pos_w - 1.0) > 1e-8:
@@ -439,36 +452,47 @@ def train_loop_ddp(cfg) -> TrainStats:
         if rank == 0 and ((step + 1) % 5 == 0 or step == 0):
             acc = _acc_from_logits(logits.detach(), tokens, mask)
             auc = _auc_from_logits(logits.detach(), tokens, mask, vocab)
+            with torch.no_grad():
+                y_m = tokens[mask]
+                pos_ct = int((y_m == 1).sum().item())
+                neg_ct = int((y_m == 0).sum().item())
             last_loss = float(loss.detach().item())
             last_acc = float(acc)
             last_auc = float(auc)
             # tqdm.write to avoid breaking the bar
             if hasattr(iterator, "write"):
                 iterator.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}", "auc": f"{last_auc:.4f}"})
-                iterator.write(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f}")
+                iterator.write(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f} pos_neg=({pos_ct},{neg_ct})")
             else:
-                print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f}")
+                print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f} pos_neg=({pos_ct},{neg_ct})")
 
-        # Periodic rollout visualization on rank 0 only (MP4)
-        if rank == 0 and ((step == 0) or ((step + 1) % 50 == 0)):
+        # Periodic rollout visualization on rank 0 only (MP4), with barriers to avoid desync
+        if (step == 0) or ((step + 1) % 50 == 0):
             try:
-                os.makedirs(roll_dir, exist_ok=True)
-                # Wrap local fwd to match (tokens,pos2d,mask)->(loss,logits,cache)
-                def fwd_wrap(tokens, pos2d, mask):
-                    l, logits = fwd(tokens, pos2d, mask)
-                    return l, logits, None
-                save_rollout_mp4(
-                    fwd_wrap,
-                    rule_bits,
-                    H,
-                    W,
-                    steps=64,
-                    device=device,
-                    savepath=os.path.join(roll_dir, f"ddp_rollout_step_{step+1:06d}.mp4"),
-                    fps=8,
-                )
+                dist.barrier()
+                if rank == 0:
+                    os.makedirs(roll_dir, exist_ok=True)
+                    # Wrap local fwd to match (tokens,pos2d,mask)->(loss,logits,cache)
+                    def fwd_wrap(tokens, pos2d, mask):
+                        l, logits = fwd(tokens, pos2d, mask)
+                        return l, logits, None
+                    # Keep DDP rollout short to minimize stall time for other ranks
+                    save_rollout_mp4(
+                        fwd_wrap,
+                        rule_bits,
+                        H,
+                        W,
+                        steps=16,
+                        device=device,
+                        savepath=os.path.join(roll_dir, f"ddp_rollout_step_{step+1:06d}.mp4"),
+                        fps=8,
+                    )
+                dist.barrier()
             except Exception:
-                pass
+                try:
+                    dist.barrier()
+                except Exception:
+                    pass
 
     # Save checkpoint (rank 0)
     if rank == 0:
