@@ -59,12 +59,25 @@ def main():
         attn_rule[L] = w.mean(axis=(1, 2))  # avg over Q and rule keys
 
     # Plot a heatmap of rule-attention by (layer, head)
-    plt.figure(figsize=(6, 3))
-    plt.imshow(attn_rule, aspect='auto', cmap='magma')
-    plt.colorbar(); plt.xlabel('Head'); plt.ylabel('Layer'); plt.title('Avg attention to rule tokens')
-    path = os.path.join(out, 'attn_to_rule_heatmap.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    print('saved:', path)
+        plt.figure(figsize=(6, 3))
+        plt.imshow(attn_rule, aspect='auto', cmap='magma')
+        plt.colorbar(); plt.xlabel('Head'); plt.ylabel('Layer'); plt.title('Avg attention to rule tokens')
+        path = os.path.join(out, 'attn_to_rule_heatmap.png')
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        # Also save numeric data for precise analysis
+        npy_path = os.path.join(out, 'attn_to_rule.npy')
+        csv_path = os.path.join(out, 'attn_to_rule.csv')
+        np.save(npy_path, attn_rule)
+        try:
+            import pandas as pd
+            import numpy as np
+            import json
+            import os
+        except Exception:
+            pass
+        np.savetxt(csv_path, attn_rule, delimiter=',')
+        print('saved:', path)
+        print('saved data:', npy_path, csv_path)
 
 
 if __name__ == '__main__':
