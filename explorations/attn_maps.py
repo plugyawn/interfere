@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--head", type=int, default=0)
     ap.add_argument("--center", action="store_true", help="Use center target cell query")
     ap.add_argument("--annotate", action="store_true", help="Overlay 3x3 box and top-k locs")
+    ap.add_argument("--mode", choices=["scores","weights","contrib"], default="weights", help="What to visualize from the head")
     ap.add_argument("--topk", type=int, default=5, help="Top-k attention keys to mark")
     ap.add_argument("--sweep", choices=["none","heads","layers"], default="none", help="Animate across heads or layers")
     ap.add_argument("--fps", type=int, default=2)
@@ -85,12 +86,16 @@ def main():
         (f"blocks.{args.layer}.attn.hook_q", _hq),
         (f"blocks.{args.layer}.attn.hook_k", _hk),
     ]
-    # Capture attention scores via run_with_hooks
+    # Capture attention scores and resid_pre via run_with_hooks/run_with_cache
     box = {}
     def _capture_scores(t, hook):
         box["scores"] = t.detach().cpu()
-    model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=hooks + [(scores_name, _capture_scores)])
+    name_resid = f"blocks.{args.layer}.hook_resid_pre"
+    def _cap_resid(x, hook):
+        box["resid_pre"] = x.detach().cpu()
+    model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=hooks + [(scores_name, _capture_scores), (name_resid, _cap_resid)])
     scores = box["scores"]  # [B,H,Q,K]
+    resid_pre = box.get("resid_pre")  # [B,T,D] (may be None if not captured)
 
     head = args.head
     attn = scores[0, head]  # [Q, K]
@@ -99,15 +104,32 @@ def main():
 
     # Map keys in t segment onto a heatmap
     t_start, t_end = t_rng
-    t_scores = attn_q[t_start:t_end].view(H, W)
+    # Choose visualization mode
+    if args.mode == "scores":
+        vec = attn_q
+    elif args.mode == "weights":
+        vec = torch.softmax(attn_q, dim=-1)
+    else:  # contrib
+        # Head OV contribution to alive logit per key: (resid_pre_i @ W_V @ W_O @ W_U[:, alive])
+        assert resid_pre is not None, "resid_pre not captured"
+        W_V = model.W_V[args.layer, head]  # [d_model, d_head] in TL
+        W_O = model.W_O[args.layer, head]  # [d_head, d_model]
+        W_U = model.W_U  # [d_model, d_vocab]
+        alive_id = 1 if "ALIVE" in ex.vocab else 1
+        ov = (W_V @ W_O).detach()  # [d_model, d_model]
+        dir_alive = W_U[:, alive_id].detach()  # [d_model]
+        R = resid_pre[0].detach()  # [T, d_model]
+        contrib = (R @ ov) @ dir_alive  # [T]
+        vec = attn_q * contrib  # elementwise per key position
+    t_scores = vec[t_start:t_end].view(H, W)
 
     out = out_dir()
 
     def save_single(layer:int, head:int, arr:torch.Tensor, annotate:bool) -> str:
         fig, ax = plt.subplots(figsize=(4,4))
-        im = ax.imshow(arr, cmap="viridis")
+        im = ax.imshow(arr.detach().cpu(), cmap="viridis")
         fig.colorbar(im)
-        ax.set_title(f"Layer {layer} Head {head} → t (q@t+1)")
+        ax.set_title(f"Layer {layer} Head {head} → t (q@t+1) [{args.mode}]")
         if annotate:
             cy, cx = H//2, W//2
             # 3x3 box around center
@@ -129,12 +151,33 @@ def main():
     single_path = save_single(args.layer, head, t_scores, args.annotate)
     print("saved:", single_path)
 
+    # Helper to build map per (L,H) per mode
+    def build_map_for(layer_i:int, head_i:int, scores_tensor:torch.Tensor, resid_tensor:torch.Tensor|None):
+        attn = scores_tensor[0, head_i]  # [Q,K]
+        vec_local = attn[q_index]
+        if args.mode == "scores":
+            v = vec_local
+        elif args.mode == "weights":
+            v = torch.softmax(vec_local, dim=-1)
+        else:
+            assert resid_tensor is not None, "resid_pre not captured for contrib"
+            W_V = model.W_V[layer_i, head_i]
+            W_O = model.W_O[layer_i, head_i]
+            W_U = model.W_U
+            alive_id = 1
+            ov = W_V @ W_O
+            dir_alive = W_U[:, alive_id]
+            R = resid_tensor[0]
+            contrib = (R @ ov) @ dir_alive
+            v = vec_local * contrib
+        return v[t_start:t_end].view(H, W)
+
     # Optional sweep animation
     if args.sweep != "none":
         frames: List[str] = []
         if args.sweep == "heads":
             for hh in range(scores.shape[1]):
-                arr = scores[0, hh, q_index, t_start:t_end].view(H, W)
+                arr = build_map_for(args.layer, hh, scores, resid_pre)
                 frames.append(save_single(args.layer, hh, arr, args.annotate))
             anim_path = os.path.join(out, f"attn_sweep_heads_L{args.layer}_center{int(args.center)}.gif")
         else:  # layers
@@ -145,13 +188,21 @@ def main():
                 box2 = {}
                 def _cap2(t, hook):
                     box2["scores"] = t.detach().cpu()
+                name_resid2 = f"blocks.{L}.hook_resid_pre"
+                box2_res = {}
+                def _cap_res2(x, hook):
+                    box2_res["resid_pre"] = x.detach().cpu()
                 hooks2 = [
                     (f"blocks.{L}.attn.hook_q", _hq),
                     (f"blocks.{L}.attn.hook_k", _hk),
                 ]
-                model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=hooks2 + [(scores_name2, _cap2)])
-                sc = box2["scores"][0, head]
-                arr = sc[q_index, t_start:t_end].view(H, W)
+                cap_hooks = hooks2 + [(scores_name2, _cap2)]
+                if args.mode == "contrib":
+                    cap_hooks += [(name_resid2, _cap_res2)]
+                model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=cap_hooks)
+                sc = box2["scores"]
+                resL = box2_res.get("resid_pre") if args.mode == "contrib" else None
+                arr = build_map_for(L, head, sc, resL)
                 frames.append(save_single(L, head, arr, args.annotate))
             anim_path = os.path.join(out, f"attn_sweep_layers_H{head}_center{int(args.center)}.gif")
 
