@@ -21,6 +21,7 @@ Scripts
 - physics_bits.py: Quantify attention to rule tokens and run small activation-patching tests (toggle rule bits and measure effect).
 - embed_scatter.py: PCA scatter of resid_pre (layer L) at t positions across samples; color by neighbor count or next-alive.
 - attn_contrib_vector.py: Contribution heatmap (weights × OV→alive) for a head with gradient quiver overlay — a “vector plot” of contribution flow.
+- rule_vectors.py: Plot rule-bit vectors from token embeddings. Cosine similarity heatmap across bits, PCA scatter with S/B labels, and arrows for <Rr_0>→<Rr_1>.
 
 Quick Start
 
