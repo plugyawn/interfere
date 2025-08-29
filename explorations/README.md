@@ -19,7 +19,7 @@ Scripts
 - attn_maps.py: Visualize attention heatmaps (per head) from a chosen target query to t-keys, projected to 2D. Saves PNGs/optional MP4s.
 - probes.py: Train linear probes to decode neighbor count and next-alive from resid_pre across layers; saves curves and summary.
 - physics_bits.py: Quantify attention to rule tokens and run small activation-patching tests (toggle rule bits and measure effect).
-- embed_scatter.py: PCA scatter of resid_pre (layer L) at t positions across samples; color by neighbor count or next-alive.
+- embed_scatter.py: PCA scatter of resid_pre (layer L) at t positions across samples; color by neighbor count, next-alive, and current-alive. Supports 2D/3D via --pca-dim.
 - attn_contrib_vector.py: Contribution heatmap (weights × OV→alive) for a head with gradient quiver overlay — a “vector plot” of contribution flow.
 - rule_vectors.py: Plot rule-bit vectors from token embeddings. Cosine similarity heatmap across bits, PCA scatter with S/B labels, and arrows for <Rr_0>→<Rr_1>.
 
