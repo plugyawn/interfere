@@ -16,7 +16,7 @@ import sys
 if __package__ is None or __package__ == "":
     import os as _os
     sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
-from explorations.utils import load_cfg, load_model, make_example, out_dir
+from explorations.utils import load_cfg, load_model, make_example, out_dir, build_trainlike_hooks
 from src.model.rope2d import apply_rope_2d
 
 
@@ -95,7 +95,9 @@ def main():
     name_resid = f"blocks.{args.layer}.hook_resid_pre"
     def _cap_resid(x, hook):
         box["resid_pre"] = x.detach().cpu()
-    model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=hooks + [(scores_name, _capture_scores), (name_resid, _cap_resid)])
+    # Ensure we include train-like masking & segment embedding on all layers for faithful geometry
+    base_hooks = build_trainlike_hooks(cfg, model, ex.pos2d, ex.tokens)
+    model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=base_hooks + [(scores_name, _capture_scores), (name_resid, _cap_resid)])
     scores = box["scores"]  # [B,H,Q,K]
     resid_pre = box.get("resid_pre")  # [B,T,D] (may be None if not captured)
 

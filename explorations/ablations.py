@@ -14,7 +14,7 @@ import sys
 if __package__ is None or __package__ == "":
     import os as _os
     sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
-from explorations.utils import load_cfg, load_model, make_example, out_dir
+from explorations.utils import load_cfg, load_model, make_example, out_dir, build_trainlike_hooks, mask_targets_like_train
 from src.model.rope2d import apply_rope_2d
 from src.train.loop import _auc_from_logits
 
@@ -43,9 +43,11 @@ def eval_auc(model, cfg, device, samples: int, batch_size: int, extra_hooks=None
     for start in range(0, total, bs):
         cur_bs = min(bs, total - start)
         ex = make_example(cfg, device=device, batch_size=cur_bs)
-        base_hooks = build_rope_hooks(model, ex.pos2d)
+        # Train-like hooks (RoPE Q/K + mask + segment embedding) and optional ablation
+        tokens_in = mask_targets_like_train(ex.tokens, ex.vocab, cfg)
+        base_hooks = build_trainlike_hooks(cfg, model, ex.pos2d, tokens_in)
         all_hooks = base_hooks + (extra_hooks or [])
-        logits = model.run_with_hooks(ex.tokens, fwd_hooks=all_hooks)
+        logits = model.run_with_hooks(tokens_in, fwd_hooks=all_hooks)
         auc = _auc_from_logits(logits, ex.tokens, ex.mask, ex.vocab)
         auc_sum += float(auc)
         n += 1

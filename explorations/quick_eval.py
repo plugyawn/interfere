@@ -12,7 +12,7 @@ if __package__ is None or __package__ == "":
     # Ensure repo root is on sys.path when running as a file
     import os as _os
     sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
-from explorations.utils import load_cfg, load_model, make_example
+from explorations.utils import load_cfg, load_model, make_example, infer_logits_trainlike
 from src.train.loop import _acc_from_logits, _auc_from_logits
 from src.model.rope2d import apply_rope_2d
 
@@ -63,8 +63,7 @@ def main():
         ex = make_example(cfg, device=device, batch_size=bs)
         if vocab is None:
             vocab = ex.vocab
-        hooks = add_rope_hooks(model, ex.pos2d)
-        logits = model.run_with_hooks(ex.tokens, fwd_hooks=hooks)  # [B, T, V]
+        logits = infer_logits_trainlike(model, cfg, ex.tokens, ex.pos2d, use_mask=True)
         acc = _acc_from_logits(logits, ex.tokens, ex.mask)
         auc = _auc_from_logits(logits, ex.tokens, ex.mask, vocab)
         acc_list.append(float(acc))
