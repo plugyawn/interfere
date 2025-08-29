@@ -35,6 +35,25 @@ def step_model(model_fwd, rule_bits, t, vocab):
     return pred
 
 
+def _roc_auc_binary(y_true, y_score) -> float:
+    import numpy as np
+    y_true = np.asarray(y_true, dtype=np.int32)
+    y_score = np.asarray(y_score, dtype=np.float64)
+    # Sort by descending score
+    order = np.argsort(-y_score)
+    y_true = y_true[order]
+    # Count positives/negatives
+    P = (y_true == 1).sum()
+    N = (y_true == 0).sum()
+    if P == 0 or N == 0:
+        return float('nan')
+    tps = (y_true == 1).cumsum()
+    fps = (y_true == 0).cumsum()
+    tpr = tps / P
+    fpr = fps / N
+    return float(np.trapz(tpr, fpr))
+
+
 def rollout_divergence(model_fwd, rule_bits, t0, steps: int = 100) -> int:
     device = t0.device
     B, _, H, W = t0.shape
@@ -78,6 +97,7 @@ def main(cfg: DictConfig) -> None:
         rb = sb_to_bits(S, B).to(device).unsqueeze(0)
         # Accuracy over random boards
         accs = []
+        aucs = []
         for _ in range(10):
             H, W = cfg.board.H, cfg.board.W
             t = (torch.rand(8, 1, H, W, device=device) < 0.5).to(torch.int64)
@@ -89,15 +109,24 @@ def main(cfg: DictConfig) -> None:
             t1 = _apply_rule(t, counts, rb.expand(t.size(0), -1))
             tokens, mask, pos2d = assemble_sequence(rb.expand(t.size(0), -1), t, t1, vocab=vocab)
             loss, logits, _ = fwd(tokens, pos2d, mask)
+            # Accuracy on targets
             acc = (logits.argmax(dim=-1)[mask] == tokens[mask]).float().mean().item()
             accs.append(acc)
+            # AUC on targets using probs for '1'
+            sel = logits[..., [vocab["0"], vocab["1"]]]
+            probs1 = torch.softmax(sel, dim=-1)[..., 1]
+            y_true = tokens[mask].detach().flatten().cpu().numpy()
+            y_score = probs1[mask].detach().flatten().cpu().numpy()
+            aucs.append(_roc_auc_binary(y_true, y_score))
         acc_avg = float(sum(accs) / len(accs))
+        auc_vals = [a for a in aucs if a == a]
+        auc_avg = float(sum(auc_vals) / max(1, len(auc_vals)))
         # Rollouts from canonical seeds
         # Blinker
         t0 = torch.zeros((1, 1, cfg.board.H, cfg.board.W), dtype=torch.long, device=device)
         t0[0, 0, cfg.board.H // 2, cfg.board.W // 2 - 1 : cfg.board.W // 2 + 2] = 1
         div = rollout_divergence(fwd, rb, t0, steps=100)
-        results[name] = {"acc": acc_avg, "rollout_divergence": div}
+        results[name] = {"acc": acc_avg, "auc": auc_avg, "rollout_divergence": div}
 
     os.makedirs("runs", exist_ok=True)
     path = os.path.join("runs", f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")

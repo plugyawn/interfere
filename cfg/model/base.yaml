@@ -8,6 +8,7 @@ model:
   n_ctx: 2100
   film: false
   segment_embed: {enabled: true}
+  binary_head: {enabled: true, pos_weight: 1.0}
 
 board:
   H: 32

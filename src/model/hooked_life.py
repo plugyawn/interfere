@@ -157,9 +157,23 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         labels_src = labels_tokens if labels_tokens is not None else tokens
         logits_2d = logits.float() if model.cfg.dtype in {torch.float16, torch.bfloat16} else logits
         mask_flat = loss_mask_l.reshape(-1).bool()
-        logits_flat = logits_2d.reshape(-1, logits_2d.size(-1))[mask_flat]
-        target_flat = labels_src.reshape(-1)[mask_flat]
-        loss = torch.nn.functional.cross_entropy(logits_flat, target_flat)
+        # Optional binary head using only {0,1} classes
+        bh = getattr(cfg.model, "binary_head", {})
+        if bool(getattr(bh, "enabled", False)):
+            idx0 = int(vocab["0"])
+            idx1 = int(vocab["1"])
+            logits_bin = logits_2d[..., [idx0, idx1]]
+            logits_flat = logits_bin.reshape(-1, 2)[mask_flat]
+            target_flat = labels_src.reshape(-1)[mask_flat]
+            pos_w = float(getattr(bh, "pos_weight", 1.0) or 1.0)
+            weight = None
+            if abs(pos_w - 1.0) > 1e-8:
+                weight = torch.tensor([1.0, pos_w], dtype=logits_flat.dtype, device=logits_flat.device)
+            loss = torch.nn.functional.cross_entropy(logits_flat, target_flat, weight=weight)
+        else:
+            logits_flat = logits_2d.reshape(-1, logits_2d.size(-1))[mask_flat]
+            target_flat = labels_src.reshape(-1)[mask_flat]
+            loss = torch.nn.functional.cross_entropy(logits_flat, target_flat)
         cache = None
         return loss, logits, cache
 
