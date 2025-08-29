@@ -5,6 +5,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+import numpy as np
 from typing import Any, Dict, Optional
 
 import torch
@@ -45,6 +46,31 @@ def _acc_from_logits(logits: torch.Tensor, tokens: torch.Tensor, mask: torch.Ten
     correct = (preds[m] == tokens[m]).sum().item()
     total = int(m.sum().item())
     return correct / max(total, 1)
+
+
+def _auc_from_logits(logits: torch.Tensor, tokens: torch.Tensor, mask: torch.Tensor, vocab: Dict[str, int]) -> float:
+    try:
+        with torch.no_grad():
+            idx0 = int(vocab["0"])  # type: ignore[index]
+            idx1 = int(vocab["1"])  # type: ignore[index]
+            sel = logits[..., [idx0, idx1]]
+            probs1 = torch.softmax(sel, dim=-1)[..., 1]
+            y_true = tokens[mask].detach().reshape(-1).cpu().numpy().astype(np.int32)
+            y_score = probs1[mask].detach().reshape(-1).cpu().numpy().astype(np.float64)
+            order = np.argsort(-y_score)
+            y_true = y_true[order]
+            P = (y_true == 1).sum()
+            N = (y_true == 0).sum()
+            if P == 0 or N == 0:
+                return float("nan")
+            tps = (y_true == 1).cumsum()
+            fps = (y_true == 0).cumsum()
+            tpr = tps / max(P, 1)
+            fpr = fps / max(N, 1)
+            auc = np.trapz(tpr, fpr)
+            return float(auc)
+    except Exception:
+        return float("nan")
 
 
 def _target_segment_bounds(H: int, W: int, multi_steps: int) -> list[tuple[int, int]]:
@@ -108,6 +134,7 @@ def train_loop(cfg) -> TrainStats:
     scaler = None  # BF16: no grad scaling required
     last_loss = 0.0
     last_acc = 0.0
+    last_auc = float("nan")
 
     # Tag this run to avoid overwriting rollouts
     run_id = time.strftime("%Y%m%d_%H%M%S")
@@ -161,13 +188,15 @@ def train_loop(cfg) -> TrainStats:
         sched.step()
 
         acc = _acc_from_logits(logits.detach(), tokens, mask)
+        auc = _auc_from_logits(logits.detach(), tokens, mask, vocab)
         last_loss = float(loss.detach().item())
         last_acc = float(acc)
-        run_log.append({"step": step, "loss": last_loss, "acc": last_acc})
+        last_auc = float(auc)
+        run_log.append({"step": step, "loss": last_loss, "acc": last_acc, "auc": last_auc})
 
         if (step + 1) % 5 == 0 or step == 0:
-            pbar.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}"})
-            pbar.write(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+            pbar.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}", "auc": f"{last_auc:.4f}"})
+            pbar.write(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f}")
 
         # Periodic rollout visualization (MP4, longer autoregressive rollout)
         if (step == 0) or ((step + 1) % 50 == 0):
@@ -196,6 +225,14 @@ def train_loop(cfg) -> TrainStats:
             f.write(json.dumps(r) + "\n")
     with open("runs/calibration.json", "w") as f:
         json.dump({"tokens_per_step": tokens_per_step, "tps": tps, "steps": steps, "secs": secs}, f)
+
+    # Save checkpoint for single-GPU runs
+    os.makedirs("checkpoints", exist_ok=True)
+    torch.save({
+        "model": model.state_dict(),
+        "opt": opt.state_dict(),
+        "cfg": cfg.__dict__,
+    }, os.path.join("checkpoints", "latest.pt"))
 
     return TrainStats(loss=last_loss, acc=last_acc, tokens_per_step=tokens_per_step, tps=tps, secs=secs)
 
@@ -274,6 +311,7 @@ def train_loop_ddp(cfg) -> TrainStats:
 
     last_loss = 0.0
     last_acc = 0.0
+    last_auc = float("nan")
 
     # Local forward helper using inner model for hooks
     inner = ddp_model.module
@@ -400,14 +438,16 @@ def train_loop_ddp(cfg) -> TrainStats:
 
         if rank == 0 and ((step + 1) % 5 == 0 or step == 0):
             acc = _acc_from_logits(logits.detach(), tokens, mask)
+            auc = _auc_from_logits(logits.detach(), tokens, mask, vocab)
             last_loss = float(loss.detach().item())
             last_acc = float(acc)
+            last_auc = float(auc)
             # tqdm.write to avoid breaking the bar
             if hasattr(iterator, "write"):
-                iterator.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}"})
-                iterator.write(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+                iterator.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}", "auc": f"{last_auc:.4f}"})
+                iterator.write(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f}")
             else:
-                print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f}")
+                print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f}")
 
         # Periodic rollout visualization on rank 0 only (MP4)
         if rank == 0 and ((step == 0) or ((step + 1) % 50 == 0)):

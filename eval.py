@@ -82,7 +82,8 @@ def main(cfg: DictConfig) -> None:
     # Load checkpoint if available
     ckpt_path = os.path.join("checkpoints", "latest.pt")
     if os.path.exists(ckpt_path):
-        state = torch.load(ckpt_path, map_location=device)
+        # In PyTorch 2.6, default weights_only=True can fail for OmegaConf metadata; allow full load here.
+        state = torch.load(ckpt_path, map_location=device, weights_only=False)
         try:
             model.load_state_dict(state["model"], strict=False)
             print(f"Loaded checkpoint: {ckpt_path}")

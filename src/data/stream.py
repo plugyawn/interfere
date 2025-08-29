@@ -180,14 +180,13 @@ def get_default_vocab():
       - '<R{i}_0>' and '<R{i}_1>' for i in 0..17
     """
     vocab = {"0": 0, "1": 1, "<BOS>": 2, "<SEP>": 3, "<SEP2>": 4, "<SEP3>": 5, "<SEP4>": 6}
-    idx = 5
+    # Assign rule token IDs after existing specials to avoid overlap
+    idx = max(vocab.values()) + 1
     for i in range(18):
-        vocab[f"<R{i}_0>"] = idx
-        idx += 1
-        vocab[f"<R{i}_1>"] = idx
-        idx += 1
-    # Add a dedicated unknown/mask token for target placeholders
-    vocab["<MASK>"] = max(vocab.values()) + 1
+        vocab[f"<R{i}_0>"] = idx; idx += 1
+        vocab[f"<R{i}_1>"] = idx; idx += 1
+    # Add a dedicated unknown/mask token for target placeholders after rule tokens
+    vocab["<MASK>"] = idx
     return vocab
 
 
