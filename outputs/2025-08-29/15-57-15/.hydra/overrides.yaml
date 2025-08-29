@@ -1,0 +1,4 @@
+- train.fast=false
+- train.steps=10000
+- train.warmup_steps=20
+- model.binary_head.pos_weight=3.0
