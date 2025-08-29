@@ -94,6 +94,12 @@ def main():
     sc = plt.scatter(Z[:,0], Z[:,1], c=C, cmap='viridis', s=4, alpha=0.5)
     plt.colorbar(sc, label='neighbor count (t)')
     plt.title(f'Layer {L} resid_pre PCA colored by count')
+    # Annotate centroids per count 0..8
+    for k in range(9):
+        m = (C == k)
+        if np.any(m):
+            cx, cy = Z[m,0].mean(), Z[m,1].mean()
+            plt.text(cx, cy, str(k), color='white', ha='center', va='center', fontsize=8, bbox=dict(boxstyle='round,pad=0.2', fc='black', alpha=0.4))
     path1 = os.path.join(out, f'embed_L{L}_count_scatter.png')
     plt.savefig(path1, dpi=150, bbox_inches='tight')
     plt.close()
@@ -103,6 +109,12 @@ def main():
     sc = plt.scatter(Z[:,0], Z[:,1], c=Y, cmap='coolwarm', s=4, alpha=0.5)
     plt.colorbar(sc, label='next alive (t+1)')
     plt.title(f'Layer {L} resid_pre PCA colored by next-alive')
+    # Annotate alive/dead centroids
+    for val, lab, col in [(0, 'dead', 'black'), (1, 'alive', 'white')]:
+        m = (Y == val)
+        if np.any(m):
+            cx, cy = Z[m,0].mean(), Z[m,1].mean()
+            plt.text(cx, cy, lab[0].upper(), color=col, ha='center', va='center', fontsize=8, bbox=dict(boxstyle='round,pad=0.2', fc='gray', alpha=0.4))
     path2 = os.path.join(out, f'embed_L{L}_next_scatter.png')
     plt.savefig(path2, dpi=150, bbox_inches='tight')
     plt.close()
@@ -113,4 +125,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

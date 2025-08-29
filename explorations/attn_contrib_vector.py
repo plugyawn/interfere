@@ -7,6 +7,7 @@ import torch
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib import patches
 
 import sys
 if __package__ is None or __package__ == "":
@@ -89,18 +90,27 @@ def main():
     gy, gx = np.gradient(arr)
 
     out = out_dir()
-    plt.figure(figsize=(6,5))
-    plt.imshow(arr, cmap='viridis')
-    plt.colorbar(label='contrib')
+    fig, ax = plt.subplots(figsize=(6,5))
+    im = ax.imshow(arr, cmap='viridis')
+    fig.colorbar(im, label='contrib')
     step = max(1, min(H,W)//16)
     Y, X = np.mgrid[0:H:1, 0:W:1]
-    plt.quiver(X[::step,::step], Y[::step,::step], gx[::step,::step], gy[::step,::step], color='white', scale=50)
-    plt.title(f'Layer {L} Head {head}: contrib heatmap + gradient vectors')
+    ax.quiver(X[::step,::step], Y[::step,::step], gx[::step,::step], gy[::step,::step], color='white', scale=50)
+    # Annotate 3x3 neighborhood around center
+    cy, cx = H//2, W//2
+    rect = patches.Rectangle((cx-1.5, cy-1.5), 3, 3, linewidth=1.5, edgecolor='w', facecolor='none')
+    ax.add_patch(rect)
+    # Mark top-k contribution locations
+    k = min(5, arr.size)
+    flat_idx = np.argsort(arr.reshape(-1))[-k:]
+    for idx in flat_idx:
+        y, x = divmod(int(idx), W)
+        ax.plot(x, y, 'ro', markersize=3)
+    ax.set_title(f'Layer {L} Head {head}: contrib heatmap + gradient vectors')
     path = os.path.join(out, f'contrib_vector_L{L}_H{head}.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    fig.savefig(path, dpi=150, bbox_inches='tight')
     print('saved:', path)
 
 
 if __name__ == '__main__':
     main()
-
