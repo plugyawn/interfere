@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import argparse
 import os
+from typing import List
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib import patches
+import imageio.v2 as imageio
+from PIL import Image
 import torch
 
+import sys
+if __package__ is None or __package__ == "":
+    import os as _os
+    sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
 from explorations.utils import load_cfg, load_model, make_example, out_dir
 from src.model.rope2d import apply_rope_2d
 
@@ -32,10 +40,20 @@ def main():
     ap.add_argument("--layer", type=int, default=0)
     ap.add_argument("--head", type=int, default=0)
     ap.add_argument("--center", action="store_true", help="Use center target cell query")
+    ap.add_argument("--annotate", action="store_true", help="Overlay 3x3 box and top-k locs")
+    ap.add_argument("--topk", type=int, default=5, help="Top-k attention keys to mark")
+    ap.add_argument("--sweep", choices=["none","heads","layers"], default="none", help="Animate across heads or layers")
+    ap.add_argument("--fps", type=int, default=2)
+    ap.add_argument("--device", choices=["auto","cpu","cuda"], default="auto")
     args = ap.parse_args()
 
     cfg = load_cfg(args.config_name)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "cpu":
+        device = torch.device("cpu")
+    elif args.device == "cuda":
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(cfg, device=device)
     ex = make_example(cfg, device=device)
 
@@ -84,12 +102,65 @@ def main():
     t_scores = attn_q[t_start:t_end].view(H, W)
 
     out = out_dir()
-    plt.figure(figsize=(4, 4))
-    plt.imshow(t_scores, cmap="viridis")
-    plt.colorbar(); plt.title(f"Layer {args.layer} Head {args.head} attn to t (query@t+1)")
-    path = os.path.join(out, f"attn_L{args.layer}_H{args.head}_center{int(args.center)}.png")
-    plt.savefig(path, dpi=150, bbox_inches="tight")
-    print("saved:", path)
+
+    def save_single(layer:int, head:int, arr:torch.Tensor, annotate:bool) -> str:
+        fig, ax = plt.subplots(figsize=(4,4))
+        im = ax.imshow(arr, cmap="viridis")
+        fig.colorbar(im)
+        ax.set_title(f"Layer {layer} Head {head} → t (q@t+1)")
+        if annotate:
+            cy, cx = H//2, W//2
+            # 3x3 box around center
+            rect = patches.Rectangle((cx-1.5, cy-1.5), 3, 3, linewidth=1.5, edgecolor='w', facecolor='none')
+            ax.add_patch(rect)
+            # mark top-k keys
+            flat = arr.detach().cpu().view(-1)
+            topk = min(args.topk, flat.numel())
+            vals, idxs = torch.topk(flat, k=topk)
+            for i, (v, idx) in enumerate(zip(vals.tolist(), idxs.tolist())):
+                y, x = divmod(idx, W)
+                ax.plot(x, y, marker='o', markersize=3, color='red', alpha=0.9)
+        path = os.path.join(out, f"attn_L{layer}_H{head}_center{int(args.center)}.png")
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return path
+
+    # Save single annotated map
+    single_path = save_single(args.layer, head, t_scores, args.annotate)
+    print("saved:", single_path)
+
+    # Optional sweep animation
+    if args.sweep != "none":
+        frames: List[str] = []
+        if args.sweep == "heads":
+            for hh in range(scores.shape[1]):
+                arr = scores[0, hh, q_index, t_start:t_end].view(H, W)
+                frames.append(save_single(args.layer, hh, arr, args.annotate))
+            anim_path = os.path.join(out, f"attn_sweep_heads_L{args.layer}_center{int(args.center)}.gif")
+        else:  # layers
+            nL = model.cfg.n_layers
+            for L in range(nL):
+                # recalc scores per layer
+                scores_name2 = f"blocks.{L}.attn.hook_attn_scores"
+                box2 = {}
+                def _cap2(t, hook):
+                    box2["scores"] = t.detach().cpu()
+                hooks2 = [
+                    (f"blocks.{L}.attn.hook_q", _hq),
+                    (f"blocks.{L}.attn.hook_k", _hk),
+                ]
+                model.run_with_hooks(ex.tokens, return_type=None, fwd_hooks=hooks2 + [(scores_name2, _cap2)])
+                sc = box2["scores"][0, head]
+                arr = sc[q_index, t_start:t_end].view(H, W)
+                frames.append(save_single(L, head, arr, args.annotate))
+            anim_path = os.path.join(out, f"attn_sweep_layers_H{head}_center{int(args.center)}.gif")
+
+        # Write GIF with uniform frame size
+        raw = [Image.open(p).convert('RGB') for p in frames]
+        w = min(im.size[0] for im in raw); h = min(im.size[1] for im in raw)
+        imgs = [im.resize((w, h)) for im in raw]
+        imageio.mimsave(anim_path, imgs, duration=max(0.01, 1.0/args.fps))
+        print("saved animation:", anim_path)
 
 
 if __name__ == "__main__":

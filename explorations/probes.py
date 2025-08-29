@@ -9,6 +9,10 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+import sys
+if __package__ is None or __package__ == "":
+    import os as _os
+    sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
 from explorations.utils import load_cfg, load_model, make_example, out_dir
 from src.model.rope2d import apply_rope_2d
 
@@ -24,13 +28,18 @@ def collect_resid_pre(model, tokens, pos2d, layer: int):
 
     name = f"blocks.{layer}.hook_resid_pre"
     box = {}
+
     def _cap(x, hook):
-        box["x"] = x.detach()
-    fwd_hooks = [
-        (f"blocks.{layer}.attn.hook_q", _hq),
-        (f"blocks.{layer}.attn.hook_k", _hk),
-        (name, _cap),
-    ]
+        # Move to CPU float32 for numpy compatibility
+        box["x"] = x.detach().to(torch.float32).cpu()
+
+    # Apply RoPE on all layers to match training geometry
+    fwd_hooks = []
+    for L in range(model.cfg.n_layers):
+        fwd_hooks.append((f"blocks.{L}.attn.hook_q", _hq))
+        fwd_hooks.append((f"blocks.{L}.attn.hook_k", _hk))
+    fwd_hooks.append((name, _cap))
+
     model.run_with_hooks(tokens, return_type=None, fwd_hooks=fwd_hooks)
     return box["x"]  # [B, T, D]
 
@@ -39,10 +48,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", default="exp/life32")
     ap.add_argument("--samples", type=int, default=512)
+    ap.add_argument("--device", choices=["auto","cpu","cuda"], default="auto")
+    ap.add_argument("--batch-size", type=int, default=2)
     args = ap.parse_args()
 
     cfg = load_cfg(args.config_name)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "cpu":
+        device = torch.device("cpu")
+    elif args.device == "cuda":
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(cfg, device=device)
     H, W = cfg.board.H, cfg.board.W
     HxW = H * W
@@ -52,20 +68,26 @@ def main():
     X_by_layer = {}
     y_count = []
     y_next = []
-    for _ in range(args.samples):
-        ex = make_example(cfg, device=device)
-        # Compute neighbor counts for t
+    # Iterate in mini-batches for efficiency
+    total = args.samples
+    bs = max(1, int(args.batch_size))
+    for start in range(0, total, bs):
+        cur_bs = min(bs, total - start)
+        ex = make_example(cfg, device=device, batch_size=cur_bs)
+        # Compute neighbor counts for t for the whole batch
         from src.data.stream import ToroidalNeighborhood
         neigh = ToroidalNeighborhood(device=device)
-        counts = neigh.neighbors(ex.t.to(torch.float32))[0, 0].flatten().detach().cpu().numpy()
-        y_count.append(counts)
-        # Next state (ground truth t1)
-        y_next.append(ex.t1[0, 0].flatten().detach().cpu().numpy())
+        counts = neigh.neighbors(ex.t.to(torch.float32)).detach().cpu()  # [B,1,H,W]
+        counts_np = counts[:, 0].reshape(cur_bs, HxW).numpy()  # [B, HxW]
+        y_count.append(counts_np.reshape(-1))
+        # Next state (ground truth t1) for the whole batch
+        y_next.append(ex.t1.detach().cpu()[:, 0].reshape(cur_bs, HxW).numpy().reshape(-1))
+        # Collect features for each layer
         for L in range(model.cfg.n_layers):
-            x = collect_resid_pre(model, ex.tokens, ex.pos2d, L)[0]  # [T,D]
+            x = collect_resid_pre(model, ex.tokens, ex.pos2d, L)  # [B,T,D] on CPU float32
             # Slice t segment only
             t_start = 1 + 18 + 1
-            feats = x[t_start : t_start + HxW].detach().cpu().numpy()  # [HxW, D]
+            feats = x[:, t_start : t_start + HxW].reshape(cur_bs * HxW, -1).numpy()  # [B*HxW, D]
             X_by_layer.setdefault(L, []).append(feats)
 
     # Stack

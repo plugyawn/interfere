@@ -8,6 +8,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import torch
 
+import sys
+if __package__ is None or __package__ == "":
+    import os as _os
+    sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
 from explorations.utils import load_cfg, load_model, make_example, out_dir
 from src.model.rope2d import apply_rope_2d
 
@@ -15,10 +19,16 @@ from src.model.rope2d import apply_rope_2d
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", default="exp/life32")
+    ap.add_argument("--device", choices=["auto","cpu","cuda"], default="auto")
     args = ap.parse_args()
 
     cfg = load_cfg(args.config_name)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "cpu":
+        device = torch.device("cpu")
+    elif args.device == "cuda":
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(cfg, device=device)
     ex = make_example(cfg, device=device)
     H, W = cfg.board.H, cfg.board.W
@@ -58,26 +68,23 @@ def main():
         w = torch.softmax(torch.tensor(s_rule), dim=-1).numpy()
         attn_rule[L] = w.mean(axis=(1, 2))  # avg over Q and rule keys
 
-    # Plot a heatmap of rule-attention by (layer, head)
-        plt.figure(figsize=(6, 3))
-        plt.imshow(attn_rule, aspect='auto', cmap='magma')
-        plt.colorbar(); plt.xlabel('Head'); plt.ylabel('Layer'); plt.title('Avg attention to rule tokens')
-        path = os.path.join(out, 'attn_to_rule_heatmap.png')
-        plt.savefig(path, dpi=150, bbox_inches='tight')
-        # Also save numeric data for precise analysis
-        npy_path = os.path.join(out, 'attn_to_rule.npy')
-        csv_path = os.path.join(out, 'attn_to_rule.csv')
-        np.save(npy_path, attn_rule)
-        try:
-            import pandas as pd
-            import numpy as np
-            import json
-            import os
-        except Exception:
-            pass
-        np.savetxt(csv_path, attn_rule, delimiter=',')
-        print('saved:', path)
-        print('saved data:', npy_path, csv_path)
+    # Plot a heatmap of rule-attention by (layer, head) with annotations
+    fig, ax = plt.subplots(figsize=(6, 3))
+    im = ax.imshow(attn_rule, aspect='auto', cmap='magma')
+    fig.colorbar(im); ax.set_xlabel('Head'); ax.set_ylabel('Layer'); ax.set_title('Avg attention to rule tokens')
+    # annotate top-K
+    K = min(5, attn_rule.size)
+    flat = attn_rule.reshape(-1)
+    idxs = np.argsort(-flat)[:K]
+    Hs = attn_rule.shape[1]
+    for i, idx in enumerate(idxs):
+        L = idx // Hs
+        Hh = idx % Hs
+        ax.text(Hh, L, '★', ha='center', va='center', color='white')
+    path = os.path.join(out, 'attn_to_rule_heatmap.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print('saved:', path)
 
 
 if __name__ == '__main__':

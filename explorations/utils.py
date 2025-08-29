@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional
 
 import hydra
 import torch
@@ -50,21 +50,22 @@ def load_model(cfg: DictConfig, device: torch.device | None = None):
     return model
 
 
-def make_example(cfg: DictConfig, device: torch.device | None = None) -> Example:
+def make_example(cfg: DictConfig, device: Optional[torch.device] = None, batch_size: int = 1) -> Example:
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vocab = get_default_vocab()
     H, W = cfg.board.H, cfg.board.W
     # Rule: Conway S23/B3
-    rb = sb_to_bits({2, 3}, {3}).to(device).unsqueeze(0)
-    # Make a random batch with a blinker centered
-    t = (torch.rand(1, 1, H, W, device=device) < 0.5).to(torch.int64)
-    t[:, :, H // 2, W // 2 - 1 : W // 2 + 2] = 1
+    rb = sb_to_bits({2, 3}, {3}).to(device).unsqueeze(0).expand(batch_size, -1)
+    # Random batch; optionally seed center with a blinker in the first example
+    t = (torch.rand(batch_size, 1, H, W, device=device) < 0.5).to(torch.int64)
+    if batch_size > 0:
+        t[0:1, :, H // 2, W // 2 - 1 : W // 2 + 2] = 1
     neigh = ToroidalNeighborhood(device=device)
     counts = neigh.neighbors(t.to(torch.float32))
     from src.data.stream import _apply_rule
 
-    t1 = _apply_rule(t, counts, rb.expand(t.size(0), -1))
-    tokens, mask, pos2d = assemble_sequence(rb.expand(t.size(0), -1), t, t1, vocab=vocab)
+    t1 = _apply_rule(t, counts, rb)
+    tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab)
     return Example(tokens=tokens, pos2d=pos2d, mask=mask, rb=rb, t=t, t1=t1, vocab=vocab)
 
 

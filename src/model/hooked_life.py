@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, List, Tuple
 
 import torch
-from transformer_lens import HookedTransformer, HookedTransformerConfig
+from transformer_lens.HookedTransformer import HookedTransformer, HookedTransformerConfig
 
 from ..data.stream import get_default_vocab
 from .rope2d import apply_rope_2d
