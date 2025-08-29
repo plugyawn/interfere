@@ -108,6 +108,8 @@ def make_batch(
     device: Optional[torch.device] = None,
     rules: Optional[torch.Tensor] = None,
     structured_prob: float = 0.1,
+    d4_prob: float = 0.0,
+    shift_prob: float = 0.0,
 ):
     """Generate (rule_bits, t, t+1) batch entirely on device.
 
@@ -145,6 +147,28 @@ def make_batch(
     neigh = ToroidalNeighborhood(device=device)
     counts = neigh.neighbors(t.to(torch.float32))
     t1 = _apply_rule(t, counts, rule_bits)
+
+    # Optional augmentations: D4 symmetry and toroidal shifts applied identically to (t, t1)
+    if d4_prob > 0.0 or shift_prob > 0.0:
+        def _apply_d4(x: torch.Tensor, rot_k: int, flip_h: bool) -> torch.Tensor:
+            y = torch.rot90(x, k=rot_k, dims=(-2, -1)) if rot_k else x
+            if flip_h:
+                y = torch.flip(y, dims=(-1,))
+            return y
+        for b in range(B):
+            # D4
+            if torch.rand(()) < d4_prob:
+                k = int(torch.randint(0, 4, (1,)).item())
+                fh = bool(torch.randint(0, 2, (1,)).item())
+                t[b] = _apply_d4(t[b], k, fh)
+                t1[b] = _apply_d4(t1[b], k, fh)
+            # Toroidal shift
+            if torch.rand(()) < shift_prob:
+                sh = int(torch.randint(0, H, (1,)).item())
+                sw = int(torch.randint(0, W, (1,)).item())
+                t[b] = torch.roll(t[b], shifts=(sh, sw), dims=(-2, -1))
+                t1[b] = torch.roll(t1[b], shifts=(sh, sw), dims=(-2, -1))
+
     return rule_bits, t, t1
 
 

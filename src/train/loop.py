@@ -10,7 +10,8 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
+from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
 from ..data.rules import sb_to_bits
@@ -89,7 +90,12 @@ def train_loop(cfg) -> TrainStats:
     opt = AdamW(model.parameters(), lr=cfg.train.lr, betas=(0.9, 0.95), weight_decay=cfg.train.weight_decay)
     steps = int(300 if getattr(cfg.train, "fast", False) else (cfg.train.steps or 1000))
     warmup = min(cfg.train.warmup_steps, steps // 10 if steps > 0 else 0)
-    sched = CosineAnnealingLR(opt, T_max=max(steps - warmup, 1))
+    if warmup > 0:
+        warm = LinearLR(opt, start_factor=0.1, total_iters=warmup)
+        cosine = CosineAnnealingLR(opt, T_max=max(steps - warmup, 1))
+        sched = SequentialLR(opt, schedulers=[warm, cosine], milestones=[warmup])
+    else:
+        sched = CosineAnnealingLR(opt, T_max=max(steps, 1))
 
     # Fixed rule for smoke: Conway S23/B3
     rule_bits = sb_to_bits({2, 3}, {3})
@@ -110,8 +116,21 @@ def train_loop(cfg) -> TrainStats:
     print(f"Rollouts will be saved under: {roll_dir}")
 
     pbar = tqdm(range(steps), desc="train", leave=True)
+    # EMA setup
+    ema_cfg = getattr(cfg.train, "ema", {})
+    ema_enabled = bool(getattr(ema_cfg, "enabled", False))
+    ema_decay = float(getattr(ema_cfg, "decay", 0.999))
+    ema: Dict[str, torch.Tensor] = {}
+    if ema_enabled:
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                if p.requires_grad:
+                    ema[n] = p.detach().float().clone()
     for step in pbar:
-        rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
+        aug = getattr(cfg.train, "augment", {})
+        d4p = float(getattr(aug, "d4_prob", 0.0) or 0.0)
+        shp = float(getattr(aug, "shift_prob", 0.0) or 0.0)
+        rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1, d4_prob=d4p, shift_prob=shp)
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         if tokens.size(1) > model.cfg.n_ctx:
             raise RuntimeError(f"Sequence length {tokens.size(1)} exceeds n_ctx {model.cfg.n_ctx}")
@@ -127,9 +146,18 @@ def train_loop(cfg) -> TrainStats:
                 tokens_in[:, s:e] = 0
             loss, logits, _ = fwd(tokens_in, pos2d, mask, labels_tokens=tokens)
         loss.backward()
+        # Gradient clipping
+        gc = float(getattr(cfg.train, "grad_clip", 0.0) or 0.0)
+        if gc > 0.0:
+            clip_grad_norm_(model.parameters(), gc)
         opt.step()
-        if step >= warmup:
-            sched.step()
+        # EMA update
+        if ema_enabled:
+            with torch.no_grad():
+                for n, p in model.named_parameters():
+                    if p.requires_grad:
+                        ema[n].mul_(ema_decay).add_(p.detach().float(), alpha=1.0 - ema_decay)
+        sched.step()
 
         acc = _acc_from_logits(logits.detach(), tokens, mask)
         last_loss = float(loss.detach().item())
@@ -201,6 +229,11 @@ def train_loop_ddp(cfg) -> TrainStats:
 
     # Optimizer & scheduler
     opt = AdamW(ddp_model.parameters(), lr=cfg.train.lr, betas=(0.9, 0.95), weight_decay=cfg.train.weight_decay)
+    # EMA setup
+    ema_cfg = getattr(cfg.train, "ema", {})
+    ema_enabled = bool(getattr(ema_cfg, "enabled", False))
+    ema_decay = float(getattr(ema_cfg, "decay", 0.999))
+    ema: Dict[str, torch.Tensor] = {}
 
     # Read calibration
     tokens_per_step_single = None
@@ -223,7 +256,12 @@ def train_loop_ddp(cfg) -> TrainStats:
         target_tokens = int(cfg.train.target_tokens)
         steps = max(target_tokens // max(tokens_per_step_global, 1), 1)
     warmup = min(cfg.train.warmup_steps, steps // 10 if steps > 0 else 0)
-    sched = CosineAnnealingLR(opt, T_max=max(steps - warmup, 1))
+    if warmup > 0:
+        warm = LinearLR(opt, start_factor=0.1, total_iters=warmup)
+        cosine = CosineAnnealingLR(opt, T_max=max(steps - warmup, 1))
+        sched = SequentialLR(opt, schedulers=[warm, cosine], milestones=[warmup])
+    else:
+        sched = CosineAnnealingLR(opt, T_max=max(steps, 1))
 
     if rank == 0:
         est_minutes = (steps * tokens_per_step_single) / max((cal.get("tps", 1e6) if 'cal' in locals() and cal else 1e6), 1e-6) / 60.0
@@ -238,6 +276,11 @@ def train_loop_ddp(cfg) -> TrainStats:
 
     # Local forward helper using inner model for hooks
     inner = ddp_model.module
+    if ema_enabled:
+        with torch.no_grad():
+            for n, p in inner.named_parameters():
+                if p.requires_grad:
+                    ema[n] = p.detach().float().clone()
 
     def fwd(tokens, pos2d, mask, labels_tokens=None):
         # Re-register hooks each call via run_with_hooks
@@ -266,6 +309,26 @@ def train_loop_ddp(cfg) -> TrainStats:
             fwd_hooks.append((f"blocks.{layer}.attn.hook_q", _hq))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_k", _hk))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_attn_scores", _hs))
+        # Segment embedding at input
+        def _he(x, hook):
+            seg = torch.zeros((x.size(0), x.size(1)), dtype=torch.long, device=x.device)
+            HxW = H * W
+            i = 0
+            i += 1; i += 18; i += 1
+            seg[:, i : i + HxW] = 1  # state
+            i += HxW
+            i += 1
+            seg[:, i : i + HxW] = 2  # t+1
+            i += HxW
+            ms = int(getattr(getattr(cfg, 'train', {}), 'multi_steps', 0))
+            if ms >= 2:
+                i += 1; seg[:, i : i + HxW] = 2; i += HxW
+                if ms >= 3:
+                    i += 1; seg[:, i : i + HxW] = 2; i += HxW
+            if getattr(inner, 'segment_embed', None) is None:
+                return x
+            return x + inner.segment_embed(seg)
+        fwd_hooks.append(("hook_embed", _he))
         logits = inner.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
         # Next-token loss (shift)
         if tokens.size(1) < 2:
@@ -295,7 +358,10 @@ def train_loop_ddp(cfg) -> TrainStats:
         iterator = range(steps)
 
     for step in iterator:
-        rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1)
+        aug = getattr(cfg.train, "augment", {})
+        d4p = float(getattr(aug, "d4_prob", 0.0) or 0.0)
+        shp = float(getattr(aug, "shift_prob", 0.0) or 0.0)
+        rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1, d4_prob=d4p, shift_prob=shp)
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         # Ensure context length does not exceed model capacity
         if tokens.size(1) > inner.cfg.n_ctx:
@@ -308,9 +374,18 @@ def train_loop_ddp(cfg) -> TrainStats:
                 tokens_in[:, s:e] = 0
             loss, logits = fwd(tokens_in, pos2d, mask, labels_tokens=tokens)
         loss.backward()
+        # Gradient clipping
+        gc = float(getattr(cfg.train, "grad_clip", 0.0) or 0.0)
+        if gc > 0.0:
+            clip_grad_norm_(ddp_model.parameters(), gc)
         opt.step()
-        if step >= warmup:
-            sched.step()
+        # EMA update
+        if ema_enabled:
+            with torch.no_grad():
+                for n, p in inner.named_parameters():
+                    if p.requires_grad:
+                        ema[n].mul_(ema_decay).add_(p.detach().float(), alpha=1.0 - ema_decay)
+        sched.step()
 
         if rank == 0 and ((step + 1) % 5 == 0 or step == 0):
             acc = _acc_from_logits(logits.detach(), tokens, mask)
@@ -348,11 +423,15 @@ def train_loop_ddp(cfg) -> TrainStats:
     if rank == 0:
         os.makedirs("checkpoints", exist_ok=True)
         path = "checkpoints/latest.pt"
-        torch.save({
+        state = {
             "model": inner.state_dict(),
             "opt": opt.state_dict(),
             "cfg": cfg.__dict__,
-        }, path)
+        }
+        if ema_enabled:
+            # store ema separately
+            state["ema"] = {k: v.cpu() for k, v in ema.items()}
+        torch.save(state, path)
 
     dist.barrier()
     dist.destroy_process_group()

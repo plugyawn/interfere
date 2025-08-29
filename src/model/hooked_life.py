@@ -44,6 +44,13 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
     rotary_dim = mc.d_head
     use_film = bool(getattr(mc, "film", False))
     film_module = RuleFiLM(mc.n_layers, mc.d_model).to(model.W_E.device) if use_film else None
+    # Segment/type embeddings (physics / state / target)
+    seg_cfg = getattr(mc, "segment_embed", {})
+    use_seg = bool(getattr(seg_cfg, "enabled", False))
+    n_segments = int(getattr(seg_cfg, "n", 3))
+    segment_table = torch.nn.Embedding(n_segments, mc.d_model).to(model.W_E.device) if use_seg else None
+    # Expose for DDP path
+    model.segment_embed = segment_table
 
     def rope_single(x, pos2d_local):
         x2, _ = apply_rope_2d(x, x, pos2d_local, rotary_dim=rotary_dim)
@@ -55,6 +62,34 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
 
         # Prepare forward hooks for all layers
         def make_hook(pos2d_captured, film_params=None):
+            # Helper: segment ids per position (0=physics, 1=state, 2=target)
+            def seg_ids_for(tokens_local: torch.Tensor) -> torch.Tensor:
+                B, T = tokens_local.shape
+                H, W = cfg.board.H, cfg.board.W
+                HxW = H * W
+                seg = torch.zeros((B, T), dtype=torch.long, device=tokens_local.device)
+                i = 0
+                i += 1              # BOS
+                i += 18             # rule
+                i += 1              # SEP
+                # state t
+                seg[:, i : i + HxW] = 1
+                i += HxW
+                # SEP2 stays in physics (0)
+                i += 1
+                # t+1
+                seg[:, i : i + HxW] = 2
+                i += HxW
+                ms = int(getattr(getattr(cfg, 'train', {}), 'multi_steps', 0))
+                if ms >= 2:
+                    i += 1  # SEP3
+                    seg[:, i : i + HxW] = 2
+                    i += HxW
+                    if ms >= 3:
+                        i += 1  # SEP4
+                        seg[:, i : i + HxW] = 2
+                        i += HxW
+                return seg
             def _hook_q(q, hook):
                 return rope_single(q, pos2d_captured.to(q.device))
 
@@ -86,7 +121,13 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
                 y = x32 * g + b
                 return y.to(x.dtype)
 
-            return _hook_q, _hook_k, _hook_resid, _hook_scores
+            def _hook_embed(x, hook):
+                if segment_table is None:
+                    return x
+                seg = seg_ids_for(tokens)
+                return x + segment_table(seg)
+
+            return _hook_q, _hook_k, _hook_resid, _hook_scores, _hook_embed
 
         fwd_hooks: List[Tuple[str, Any]] = []
         film_params = None
@@ -101,12 +142,14 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
                     rb[i_b, r] = 1.0 if tid == vocab[f"<R{r}_1>"] else 0.0
             gamma, beta = film_module(rb)
             film_params = (gamma, beta)
-        HookQ, HookK, HookR, HookS = make_hook(pos2d, film_params)
+        HookQ, HookK, HookR, HookS, HookE = make_hook(pos2d, film_params)
         for layer in range(model.cfg.n_layers):
             fwd_hooks.append((f"blocks.{layer}.attn.hook_q", HookQ))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_k", HookK))
             fwd_hooks.append((f"blocks.{layer}.hook_resid_pre", HookR))
             fwd_hooks.append((f"blocks.{layer}.attn.hook_attn_scores", HookS))
+        # Add segment embedding at input embedding
+        fwd_hooks.append(("hook_embed", HookE))
 
         logits = model.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
         # Next-token prediction: use logits at position t-1 to predict token at position t
