@@ -331,18 +331,13 @@ def train_loop_ddp(cfg) -> TrainStats:
             return x + inner.segment_embed(seg)
         fwd_hooks.append(("hook_embed", _he))
         logits = inner.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
-        # Next-token loss (shift)
-        if tokens.size(1) < 2:
-            raise ValueError("Sequence too short for next-token training")
-        logits_shift = logits[:, :-1, :]
+        # Loss on same positions as mask (inputs at those positions should be <MASK>)
         target_src = tokens if labels_tokens is None else labels_tokens
-        target_shift = target_src[:, 1:]
-        mask_shift = mask[:, 1:]
-        assert not mask[:, 0].any().item(), "loss_mask must be false at position 0"
-        mask_flat = mask_shift.reshape(-1).bool()
+        mask_flat = mask.reshape(-1).bool()
+        logits_2d = logits.float() if logits.dtype in (torch.float16, torch.bfloat16) else logits
         loss = F.cross_entropy(
-            logits_shift.reshape(-1, logits_shift.size(-1))[mask_flat],
-            target_shift.reshape(-1)[mask_flat],
+            logits_2d.reshape(-1, logits_2d.size(-1))[mask_flat],
+            target_src.reshape(-1)[mask_flat],
         )
         return loss, logits
 

@@ -152,22 +152,13 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         fwd_hooks.append(("hook_embed", HookE))
 
         logits = model.run_with_hooks(tokens, return_type="logits", fwd_hooks=fwd_hooks)
-        # Next-token prediction: use logits at position t-1 to predict token at position t
-        # Shift by one so we never let a token predict itself.
-        if tokens.size(1) < 2:
-            raise ValueError("Sequence too short for next-token training")
-        logits_shift = logits[:, :-1, :]
-        # Allow supplying separate labels to support scheduled sampling / curriculum
+        # Compute loss on the same positions indicated by loss_mask (inputs at those
+        # positions should be masked with <MASK> by the caller to avoid leakage).
         labels_src = labels_tokens if labels_tokens is not None else tokens
-        target_shift = labels_src[:, 1:]
-        mask_shift = loss_mask_l[:, 1:]
-        # Safety: first position must never be supervised
-        assert not loss_mask_l[:, 0].any().item(), "loss_mask must be false at position 0"
-        if model.cfg.dtype in {torch.float16, torch.bfloat16}:
-            logits_shift = logits_shift.float()
-        mask_flat = mask_shift.reshape(-1).bool()
-        logits_flat = logits_shift.reshape(-1, logits_shift.size(-1))[mask_flat]
-        target_flat = target_shift.reshape(-1)[mask_flat]
+        logits_2d = logits.float() if model.cfg.dtype in {torch.float16, torch.bfloat16} else logits
+        mask_flat = loss_mask_l.reshape(-1).bool()
+        logits_flat = logits_2d.reshape(-1, logits_2d.size(-1))[mask_flat]
+        target_flat = labels_src.reshape(-1)[mask_flat]
         loss = torch.nn.functional.cross_entropy(logits_flat, target_flat)
         cache = None
         return loss, logits, cache
