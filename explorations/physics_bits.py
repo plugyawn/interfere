@@ -20,6 +20,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", default="exp/life32")
     ap.add_argument("--device", choices=["auto","cpu","cuda"], default="auto")
+    ap.add_argument("--run-id", default=None)
+    ap.add_argument("--ckpt", default=None)
     args = ap.parse_args()
 
     cfg = load_cfg(args.config_name)
@@ -29,7 +31,7 @@ def main():
         device = torch.device("cuda")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(cfg, device=device)
+    model = load_model(cfg, device=device, run_id=args.run_id, ckpt_path=args.ckpt)
     ex = make_example(cfg, device=device)
     H, W = cfg.board.H, cfg.board.W
     HxW = H * W

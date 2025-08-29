@@ -30,6 +30,11 @@ train:
   grad_clip: 1.0
   ema: {enabled: true, decay: 0.999}
   augment: {d4_prob: 0.5, shift_prob: 0.5}
+  # Data generation controls
+  random_rules: false          # if true, sample random S/B rule per example
+  random_boards: true          # if false, reuse a fixed board batch each step
+  structured_prob: 0.1         # probability of stamping canonical patterns
+  density_mix: [0.05, 0.1, 0.2, 0.3, 0.5]
   eval_freq: 200
   log_freq: 200
 

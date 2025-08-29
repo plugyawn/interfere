@@ -56,6 +56,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", default="exp/life32")
     ap.add_argument("--device", choices=["auto","cpu","cuda"], default="auto")
+    ap.add_argument("--run-id", default=None)
+    ap.add_argument("--ckpt", default=None)
     ap.add_argument("--samples", type=int, default=128)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--layers", type=str, default="all", help="Comma list of layers to test or 'all'")
@@ -68,7 +70,7 @@ def main():
         device = torch.device("cuda")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(cfg, device=device)
+    model = load_model(cfg, device=device, run_id=args.run_id, ckpt_path=args.ckpt)
 
     out = out_dir()
 

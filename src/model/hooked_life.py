@@ -1,7 +1,7 @@
 """HookedTransformer wrapper with 2D RoPE via hooks."""
 from __future__ import annotations
 
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Optional
 
 import torch
 from transformer_lens.HookedTransformer import HookedTransformer, HookedTransformerConfig
@@ -11,7 +11,7 @@ from .rope2d import apply_rope_2d
 from .film import RuleFiLM
 
 
-def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
+def build_model(cfg: Any, device: Optional[torch.device] = None) -> Tuple[HookedTransformer, Any]:
     """Instantiate HookedTransformer and return (model, forward_fn).
 
     forward_fn(tokens, pos2d, loss_mask) -> (loss, logits, cache)
@@ -22,6 +22,8 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
     mc = cfg.model
     # Set dtype based on training precision preference
     dtype = torch.bfloat16 if bool(getattr(getattr(cfg, "train", {}), "bf16", False)) else torch.float32
+    # Choose construction device (important for DDP to avoid cross-device buffers)
+    construct_device = str(device) if device is not None else "cpu"
     cfg_tl = HookedTransformerConfig(
         n_layers=mc.n_layers,
         d_model=mc.d_model,
@@ -33,7 +35,7 @@ def build_model(cfg: Any) -> Tuple[HookedTransformer, Any]:
         d_vocab=d_vocab,
         attn_only=False,
         normalization_type="LNPre",
-        device="cpu",
+        device=construct_device,
         dtype=dtype,
         positional_embedding_type="standard",
     )

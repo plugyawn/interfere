@@ -9,6 +9,7 @@ import hydra
 import torch
 from hydra import compose, initialize
 from omegaconf import DictConfig
+from glob import glob
 
 from src.data.stream import assemble_sequence, get_default_vocab, ToroidalNeighborhood
 from src.data.rules import sb_to_bits
@@ -35,16 +36,39 @@ def load_cfg(config_name: str = "exp/life32") -> DictConfig:
     return cfg
 
 
-def load_model(cfg: DictConfig, device: torch.device | None = None):
+def _resolve_ckpt(run_id: Optional[str] = None, ckpt_path: Optional[str] = None) -> Optional[str]:
+    # Explicit path wins
+    if ckpt_path and os.path.exists(ckpt_path):
+        return ckpt_path
+    # Env or arg run_id
+    rid = run_id or os.environ.get("RUN_ID")
+    if rid:
+        p = os.path.join("checkpoints", rid, "latest.pt")
+        if os.path.exists(p):
+            return p
+    # Try newest run subdir
+    cands = sorted(glob(os.path.join("checkpoints", "*", "latest.pt")), key=lambda p: os.path.getmtime(p), reverse=True)
+    if cands:
+        return cands[0]
+    # Fallback root latest
+    p = os.path.join("checkpoints", "latest.pt")
+    return p if os.path.exists(p) else None
+
+
+def load_model(cfg: DictConfig, device: torch.device | None = None, run_id: Optional[str] = None, ckpt_path: Optional[str] = None):
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, _ = build_model(cfg)
-    ckpt = os.path.join("checkpoints", "latest.pt")
-    if os.path.exists(ckpt):
+    model, _ = build_model(cfg, device=device)
+    ckpt = _resolve_ckpt(run_id=run_id, ckpt_path=ckpt_path)
+    if ckpt is None:
+        print("Warn: no checkpoint found; using randomly initialized model")
+    else:
+        print(f"Loading checkpoint: {ckpt}")
         state = torch.load(ckpt, map_location="cpu", weights_only=False)
         try:
             model.load_state_dict(state.get("model", state), strict=False)
         except Exception as e:
             print("Warn: failed to load full state:", e)
+    print("Moving model to device: ", device)
     model = model.to(device)
     model.eval()
     return model

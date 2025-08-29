@@ -25,19 +25,22 @@ Quick Start
 1) Ensure a checkpoint exists at checkpoints/latest.pt (rank-0 writes it at the end of training). For DDP, you can copy it immediately or run a short single-GPU save.
 
 2) Attention maps (life32 example):
-   python explorations/attn_maps.py --config-name exp/life32 --head 0 --layer 0 --center
+   python explorations/attn_maps.py --config-name exp/life32 --head 0 --layer 0 --center --run-id <RUN_ID>
 
 3) Linear probes:
-   python explorations/probes.py --config-name exp/life32 --samples 512
+   python explorations/probes.py --config-name exp/life32 --samples 512 --run-id <RUN_ID>
 
 4) Physics bits analysis:
-   python explorations/physics_bits.py --config-name exp/life32
+   python explorations/physics_bits.py --config-name exp/life32 --run-id <RUN_ID>
 
 Outputs are written under assets/explorations/<timestamp>/.
+
+Checkpoint discovery
+- Training now saves to `checkpoints/<RUN_ID>/latest.pt` and updates `checkpoints/latest.pt` as a symlink.
+- Explorations accept `--run-id` or `--ckpt` to choose a checkpoint; if omitted, the newest `checkpoints/*/latest.pt` is used (fallback to `checkpoints/latest.pt`).
 
 Notes
 
 - All analyses run with the same hooks used at train time: 2D RoPE (Q/K) and segment embeddings at hook_embed.
 - For rollouts in videos we mask target inputs with <MASK> to match train/infer; analyses respect this convention.
 - For reproducibility, you can add a fixed seed per run; the scripts are light and intended as interactive building blocks.
-

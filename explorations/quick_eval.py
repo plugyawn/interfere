@@ -39,6 +39,8 @@ def main():
     ap.add_argument("--samples", type=int, default=512)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", choices=["auto","cpu","cuda"], default="auto")
+    ap.add_argument("--run-id", default=None)
+    ap.add_argument("--ckpt", default=None)
     args = ap.parse_args()
 
     cfg = load_cfg(args.config_name)
@@ -48,7 +50,7 @@ def main():
         device = torch.device("cuda")
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(cfg, device=device)
+    model = load_model(cfg, device=device, run_id=args.run_id, ckpt_path=args.ckpt)
 
     total_batches = math.ceil(args.samples / args.batch_size)
     acc_list: List[float] = []

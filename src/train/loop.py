@@ -5,6 +5,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+import shutil
 import numpy as np
 from typing import Any, Dict, Optional
 
@@ -113,9 +114,8 @@ def train_loop(cfg) -> TrainStats:
     H, W = cfg.board.H, cfg.board.W
     vocab = get_default_vocab()
 
-    # Build model
-    model, fwd = build_model(cfg)
-    model = model.to(device)
+    # Build model directly on device
+    model, fwd = build_model(cfg, device=device)
     model.train()
 
     # Optimizer & scheduler
@@ -129,7 +129,8 @@ def train_loop(cfg) -> TrainStats:
     else:
         sched = CosineAnnealingLR(opt, T_max=max(steps, 1))
 
-    # Fixed rule for smoke: Conway S23/B3
+    # Rule selection
+    random_rules = bool(getattr(cfg.train, "random_rules", False))
     rule_bits = sb_to_bits({2, 3}, {3})
 
     # Logging
@@ -143,7 +144,12 @@ def train_loop(cfg) -> TrainStats:
     last_auc = float("nan")
 
     # Tag this run to avoid overwriting rollouts
-    run_id = time.strftime("%Y%m%d_%H%M%S")
+    run_id = str(
+        os.environ.get("RUN_ID")
+        or getattr(getattr(cfg, "exp", {}), "run_id", None)
+        or getattr(getattr(cfg, "train", {}), "run_id", None)
+        or time.strftime("%Y%m%d_%H%M%S")
+    )
     roll_dir = os.path.join("assets", "rollouts", run_id)
     os.makedirs(roll_dir, exist_ok=True)
     print(f"Rollouts will be saved under: {roll_dir}")
@@ -165,7 +171,19 @@ def train_loop(cfg) -> TrainStats:
         aug = getattr(cfg.train, "augment", {})
         d4p = float(getattr(aug, "d4_prob", 0.0) or 0.0)
         shp = float(getattr(aug, "shift_prob", 0.0) or 0.0)
-        rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1, d4_prob=d4p, shift_prob=shp)
+        structured_prob = float(getattr(cfg.train, "structured_prob", 0.1) or 0.0)
+        density_mix = tuple(getattr(cfg.train, "density_mix", (0.05, 0.1, 0.2, 0.3, 0.5)))
+        random_boards = bool(getattr(cfg.train, "random_boards", True))
+        # Choose per-step batch
+        rules_arg = None if random_rules else rule_bits
+        if random_boards:
+            rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rules_arg, structured_prob=structured_prob, d4_prob=d4p, shift_prob=shp, density_mix=density_mix)
+        else:
+            # Reuse a fixed batch generated once
+            if step == 0:
+                fixed = make_batch(B=B, H=H, W=W, device=device, rules=rules_arg, structured_prob=structured_prob, d4_prob=d4p, shift_prob=shp, density_mix=density_mix)
+                _fixed_cache = fixed
+            rb, t, t1 = _fixed_cache
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         if tokens.size(1) > model.cfg.n_ctx:
             raise RuntimeError(f"Sequence length {tokens.size(1)} exceeds n_ctx {model.cfg.n_ctx}")
@@ -246,13 +264,38 @@ def train_loop(cfg) -> TrainStats:
     with open("runs/calibration.json", "w") as f:
         json.dump({"tokens_per_step": tokens_per_step, "tps": tps, "steps": steps, "secs": secs}, f)
 
-    # Save checkpoint for single-GPU runs
+    # Save checkpoint for single-GPU runs, tagged by run_id
     os.makedirs("checkpoints", exist_ok=True)
-    torch.save({
+    ckpt_dir = os.path.join("checkpoints", run_id)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    state = {
         "model": model.state_dict(),
         "opt": opt.state_dict(),
         "cfg": cfg.__dict__,
-    }, os.path.join("checkpoints", "latest.pt"))
+    }
+    ckpt_path = os.path.join(ckpt_dir, "latest.pt")
+    torch.save(state, ckpt_path)
+    try:
+        sz = os.path.getsize(ckpt_path)
+        print(f"[checkpoint] saved {ckpt_path} ({sz/1e6:.1f} MB)")
+    except Exception:
+        print(f"[checkpoint] saved {ckpt_path}")
+    # Maintain a convenience symlink/copy at checkpoints/latest.pt
+    latest = os.path.join("checkpoints", "latest.pt")
+    try:
+        if os.path.islink(latest) or os.path.exists(latest):
+            try:
+                os.remove(latest)
+            except Exception:
+                pass
+        # Use relative path in symlink for portability
+        rel = os.path.relpath(ckpt_path, os.path.dirname(latest))
+        os.symlink(rel, latest)
+    except Exception:
+        try:
+            shutil.copy2(ckpt_path, latest)
+        except Exception:
+            pass
 
     return TrainStats(loss=last_loss, acc=last_acc, tokens_per_step=tokens_per_step, tps=tps, secs=secs)
 
@@ -280,9 +323,8 @@ def train_loop_ddp(cfg) -> TrainStats:
     H, W = cfg.board.H, cfg.board.W
     vocab = get_default_vocab()
 
-    # Build and wrap model
-    model, _ = build_model(cfg)
-    model = model.to(device)
+    # Build and wrap model on the correct local device
+    model, _ = build_model(cfg, device=device)
     ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     # Optimizer & scheduler
@@ -327,6 +369,8 @@ def train_loop_ddp(cfg) -> TrainStats:
             f"DDP world_size={world_size} global_batch={B*world_size} tokens_per_step={tokens_per_step_global} steps={steps} est_min={est_minutes:.1f}"
         )
 
+    # Rule selection
+    random_rules = bool(getattr(cfg.train, "random_rules", False))
     rule_bits = sb_to_bits({2, 3}, {3})
 
     last_loss = 0.0
@@ -416,7 +460,12 @@ def train_loop_ddp(cfg) -> TrainStats:
         return loss, logits
 
     # Tag this run and progress bar on rank 0 only
-    run_id = time.strftime("%Y%m%d_%H%M%S")
+    run_id = str(
+        os.environ.get("RUN_ID")
+        or getattr(getattr(cfg, "exp", {}), "run_id", None)
+        or getattr(getattr(cfg, "train", {}), "run_id", None)
+        or time.strftime("%Y%m%d_%H%M%S")
+    )
     roll_dir = os.path.join("assets", "rollouts", run_id)
     if rank == 0:
         os.makedirs(roll_dir, exist_ok=True)
@@ -433,7 +482,17 @@ def train_loop_ddp(cfg) -> TrainStats:
         aug = getattr(cfg.train, "augment", {})
         d4p = float(getattr(aug, "d4_prob", 0.0) or 0.0)
         shp = float(getattr(aug, "shift_prob", 0.0) or 0.0)
-        rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rule_bits, structured_prob=0.1, d4_prob=d4p, shift_prob=shp)
+        structured_prob = float(getattr(cfg.train, "structured_prob", 0.1) or 0.0)
+        density_mix = tuple(getattr(cfg.train, "density_mix", (0.05, 0.1, 0.2, 0.3, 0.5)))
+        random_boards = bool(getattr(cfg.train, "random_boards", True))
+        rules_arg = None if random_rules else rule_bits
+        if random_boards:
+            rb, t, t1 = make_batch(B=B, H=H, W=W, device=device, rules=rules_arg, structured_prob=structured_prob, d4_prob=d4p, shift_prob=shp, density_mix=density_mix)
+        else:
+            if step == 0:
+                fixed = make_batch(B=B, H=H, W=W, device=device, rules=rules_arg, structured_prob=structured_prob, d4_prob=d4p, shift_prob=shp, density_mix=density_mix)
+                _fixed_cache = fixed
+            rb, t, t1 = _fixed_cache
         tokens, mask, pos2d = assemble_sequence(rb, t, t1, vocab=vocab, multi_steps=getattr(cfg.train, "multi_steps", 0))
         # Ensure context length does not exceed model capacity
         if tokens.size(1) > inner.cfg.n_ctx:
@@ -508,7 +567,10 @@ def train_loop_ddp(cfg) -> TrainStats:
     # Save checkpoint (rank 0)
     if rank == 0:
         os.makedirs("checkpoints", exist_ok=True)
-        path = "checkpoints/latest.pt"
+        # Save under run_id directory and update latest symlink
+        ckpt_dir = os.path.join("checkpoints", run_id)
+        os.makedirs(ckpt_dir, exist_ok=True)
+        path = os.path.join(ckpt_dir, "latest.pt")
         state = {
             "model": inner.state_dict(),
             "opt": opt.state_dict(),
@@ -518,6 +580,26 @@ def train_loop_ddp(cfg) -> TrainStats:
             # store ema separately
             state["ema"] = {k: v.cpu() for k, v in ema.items()}
         torch.save(state, path)
+        try:
+            sz = os.path.getsize(path)
+            print(f"[checkpoint] saved {path} ({sz/1e6:.1f} MB)")
+        except Exception:
+            print(f"[checkpoint] saved {path}")
+        # Maintain a convenience symlink/copy at checkpoints/latest.pt
+        latest = os.path.join("checkpoints", "latest.pt")
+        try:
+            if os.path.islink(latest) or os.path.exists(latest):
+                try:
+                    os.remove(latest)
+                except Exception:
+                    pass
+            rel = os.path.relpath(path, os.path.dirname(latest))
+            os.symlink(rel, latest)
+        except Exception:
+            try:
+                shutil.copy2(path, latest)
+            except Exception:
+                pass
 
     dist.barrier()
     dist.destroy_process_group()
