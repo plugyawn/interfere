@@ -1,0 +1,56 @@
+model:
+  n_layers: 2
+  d_model: 256
+  n_heads: 4
+  d_head: 64
+  d_mlp: 1024
+  n_ctx: 600
+  film: false
+  segment_embed:
+    enabled: true
+  binary_head:
+    enabled: true
+    pos_weight: 3.0
+board:
+  H: 16
+  W: 16
+train:
+  bf16: true
+  compile:
+    enabled: false
+    scope: block
+  batch_per_gpu: 64
+  grad_accum: 1
+  lr: 0.0002
+  weight_decay: 0.1
+  warmup_steps: 200
+  steps: 1000
+  target_tokens: 10000000.0
+  seed: 123
+  multi_steps: 0
+  curriculum:
+    enabled: true
+    p_max: 0.5
+    start: 0
+    end: 200
+  grad_clip: 1.0
+  ema:
+    enabled: true
+    decay: 0.999
+  augment:
+    d4_prob: 0.5
+    shift_prob: 0.5
+  eval_freq: 200
+  fast: false
+interp:
+  rule_battery:
+  - S23/B3
+  - S23/B36
+  - B2/S
+  interp:
+    rule_battery:
+    - S23/B3
+    - S23/B36
+    - B2/S
+exp:
+  name: life_smoke

@@ -30,6 +30,8 @@ train:
   grad_clip: 1.0
   ema: {enabled: true, decay: 0.999}
   augment: {d4_prob: 0.5, shift_prob: 0.5}
+  eval_freq: 200
+  log_freq: 200
 
 interp:
   rule_battery: ["S23/B3","S23/B36","B2/S"]

@@ -149,6 +149,8 @@ def train_loop(cfg) -> TrainStats:
     print(f"Rollouts will be saved under: {roll_dir}")
 
     pbar = tqdm(range(steps), desc="train", leave=True)
+    eval_freq = int(getattr(cfg.train, "eval_freq", 200) or 200)
+    log_freq = int(getattr(cfg.train, "log_freq", 200) or 200)
     # EMA setup
     ema_cfg = getattr(cfg.train, "ema", {})
     ema_enabled = bool(getattr(ema_cfg, "enabled", False))
@@ -193,24 +195,31 @@ def train_loop(cfg) -> TrainStats:
                         ema[n].mul_(ema_decay).add_(p.detach().float(), alpha=1.0 - ema_decay)
         sched.step()
 
-        acc = _acc_from_logits(logits.detach(), tokens, mask)
-        auc = _auc_from_logits(logits.detach(), tokens, mask, vocab)
-        # Class balance insight for target slice
-        with torch.no_grad():
-            y_m = tokens[mask]
-            pos_ct = int((y_m == 1).sum().item())
-            neg_ct = int((y_m == 0).sum().item())
+        # Only compute acc/auc on log interval to keep prints/evals sparse
+        acc = float('nan')
+        auc = float('nan')
+        pos_ct = 0
+        neg_ct = 0
+        if (step == 0) or ((step + 1) % log_freq == 0) or (step + 1 == steps):
+            acc = _acc_from_logits(logits.detach(), tokens, mask)
+            auc = _auc_from_logits(logits.detach(), tokens, mask, vocab)
+            # Class balance insight for target slice
+            with torch.no_grad():
+                y_m = tokens[mask]
+                pos_ct = int((y_m == 1).sum().item())
+                neg_ct = int((y_m == 0).sum().item())
         last_loss = float(loss.detach().item())
         last_acc = float(acc)
         last_auc = float(auc)
         run_log.append({"step": step, "loss": last_loss, "acc": last_acc, "auc": last_auc, "pos": pos_ct, "neg": neg_ct})
 
-        if (step + 1) % 5 == 0 or step == 0:
-            pbar.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}", "auc": f"{last_auc:.4f}"})
+        # Always show loss on the bar; print acc/auc only on log interval
+        pbar.set_postfix({"loss": f"{last_loss:.4f}"})
+        if (step == 0) or ((step + 1) % log_freq == 0) or (step + 1 == steps):
             pbar.write(f"step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f} pos_neg=({pos_ct},{neg_ct})")
 
         # Periodic rollout visualization (MP4, longer autoregressive rollout)
-        if (step == 0) or ((step + 1) % 50 == 0):
+        if (step == 0) or ((step + 1) % eval_freq == 0):
             try:
                 os.makedirs(roll_dir, exist_ok=True)
                 save_rollout_mp4(
@@ -417,6 +426,8 @@ def train_loop_ddp(cfg) -> TrainStats:
         iterator = tqdm(range(steps), desc="train(ddp)", leave=True)
     else:
         iterator = range(steps)
+    eval_freq = int(getattr(cfg.train, "eval_freq", 200) or 200)
+    log_freq = int(getattr(cfg.train, "log_freq", 200) or 200)
 
     for step in iterator:
         aug = getattr(cfg.train, "augment", {})
@@ -449,7 +460,7 @@ def train_loop_ddp(cfg) -> TrainStats:
                         ema[n].mul_(ema_decay).add_(p.detach().float(), alpha=1.0 - ema_decay)
         sched.step()
 
-        if rank == 0 and ((step + 1) % 5 == 0 or step == 0):
+        if rank == 0 and ((step == 0) or ((step + 1) % log_freq == 0) or (step + 1 == steps)):
             acc = _acc_from_logits(logits.detach(), tokens, mask)
             auc = _auc_from_logits(logits.detach(), tokens, mask, vocab)
             with torch.no_grad():
@@ -461,13 +472,13 @@ def train_loop_ddp(cfg) -> TrainStats:
             last_auc = float(auc)
             # tqdm.write to avoid breaking the bar
             if hasattr(iterator, "write"):
-                iterator.set_postfix({"loss": f"{last_loss:.4f}", "acc": f"{last_acc:.4f}", "auc": f"{last_auc:.4f}"})
+                iterator.set_postfix({"loss": f"{last_loss:.4f}"})
                 iterator.write(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f} pos_neg=({pos_ct},{neg_ct})")
             else:
                 print(f"[rank0] step {step+1}/{steps} loss={last_loss:.4f} acc={last_acc:.4f} auc={last_auc:.4f} pos_neg=({pos_ct},{neg_ct})")
 
         # Periodic rollout visualization on rank 0 only (MP4), with barriers to avoid desync
-        if (step == 0) or ((step + 1) % 50 == 0):
+        if (step == 0) or ((step + 1) % eval_freq == 0):
             try:
                 dist.barrier()
                 if rank == 0:
